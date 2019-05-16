@@ -1,9 +1,13 @@
 from libpy3.mysqldb import mysqldb
 import json
 from configparser import ConfigParser
-from pyrogram import Client, Message, User, MessageHandler, Chat
+from pyrogram import Client, Message, User, MessageHandler, Chat, Filters
+import pyrogram
 import hashlib
+import warnings
 import traceback
+import threading
+import datetime
 
 class user_profile(object):
 	def __init__(self, user: User or Chat or None):
@@ -31,9 +35,9 @@ class user_profile(object):
 				"INSERT INTO `user_history` (`user_id`, `username`, `first_name`, `last_name`, `photo_id`, `hash`) VALUES (%s, %s, %s, %s, %s, %s)",
 				(
 					self.user_id,
-					self.username if self.username else '',
+					self.username,
 					self.first_name,
-					self.last_name if self.last_name else '',
+					self.last_name,
 					self.photo_id,
 					self.hash
 				)
@@ -43,16 +47,52 @@ class user_profile(object):
 				"INSERT INTO `user_history` (`user_id`, `username`, `first_name` , `photo_id`, `hash`) VALUES (%s, %s, %s, %s, %s)",
 				(
 					self.user_id,
-					self.username if self.username else '',
+					self.username,
 					self.full_name,
 					self.photo_id,
 					self.hash
 				)
 			)
 
+class bot_search_helper(object):
+	def __init__(self, bot_instance: Client or str, owner_id: int):
+		if isinstance(bot_instance, Client):
+			self.bot = bot_instance
+		else:
+			if pyrogram.__version__.split()[1] > 11:
+				warnings.warn(
+					'Current is not fully support 0.12.0 or above, please use pyrogram==0.11.0 instead',
+					RuntimeWarning
+				)
+			config = ConfigParser()
+			config.read('config.ini')
+			self.bot = Client(
+				session_name = bot_instance,
+				api_hash = config['account']['api_hash'],
+				api_id = config['account']['api_id']
+			)
+		self.owner = owner_id
+		self.bot.add_handler(MessageHandler(self.handle_search_user_history, Filters.private & Filters.chat(self.owner) & Filters.command('su')))
+		self.bot.add_handler(MessageHandler(self.handle_search_message_history, Filters.private & Filters.chat(self.owner) & Filters.command('sm')))
+		self.bot.add_handler(MessageHandler(self.handle_accurate_search_user, Filters.private & Filters.chat(self.owner) & Filters.command('ua')))
+		self.bot.start()
+
+	def handle_search_user_history(self, client: Client, msg: Message):
+		pass
+
+	def handle_accurate_search_user(self, client: Client, msg: Message):
+		pass
+
+	def handle_search_message_history(self, client: Client, msg: Message):
+		pass
+
+	def stop(self):
+		return self.bot.stop()
 
 class history_index_class(object):
-	def __init__(self, client: Client = None, conn: mysqldb = None):
+	def __init__(self, client: Client = None, conn: mysqldb = None, bot_instance: list or tuple = (None, 0)):
+		self._lock_user = threading.Lock()
+		self._lock_msg = threading.Lock()
 		if client is None:
 			config = ConfigParser()
 			config.read('config.ini')
@@ -82,9 +122,18 @@ class history_index_class(object):
 			self.conn = conn
 			self._init = True
 		
+		self.init_bot(*bot_instance)
+
 		self.client.add_handler(MessageHandler(self.handle_all_message))
 
+	def init_bot(self, bot_instance: str or Client, owner: int):
+		if bot_instance is None: return
+		self.bot = bot_search_helper(bot_instance, owner)
+
 	def handle_all_message(self, _: Client, msg: Message):
+		threading.Thread(target = self._thread, args = (msg,), daemon = True).start()
+	
+	def _thread(self, msg: Message):
 		self.user_profile_track(msg)
 		self.insert_msg(msg)
 
@@ -101,11 +150,15 @@ class history_index_class(object):
 		return msg
 
 	def insert_msg(self, msg: Message):
-		h = self.get_hash(msg)
+		with self._lock_user:
+			self._insert_msg(msg)
+
+	def _insert_msg(self, msg: Message):
 		text = msg.text if msg.text else msg.caption if msg.caption else ''
-		if text == '': # May log any message in the future
+		if text == '' or text.startswith('/') and not text.startswith('//'): # May log any message in the future
 			return
 		forward_user = msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else 0
+		h = self.get_hash(msg)
 		sqlObj = self.conn.query1("SELECT `_id` FROM `index` WHERE `hash` = %s", (h,))
 		if sqlObj is not None:
 			self.conn.execute("UPDATE `index` SET `text` = %s WHERE `_id` = %s", (text, str(sqlObj['_id'])))
@@ -114,7 +167,7 @@ class history_index_class(object):
 		from_user = msg.from_user.id if msg.from_user else msg.chat.id
 		msg = self.drop_useless_part(msg)
 		self.conn.execute(
-			"INSERT INTO `index` (`hash`, `chat_id`, `message_id`, `from_user`, `forward_from`, `text`) VALUES (%s, %s, %s, %s, %s, %s)",
+			"INSERT INTO `index` (`hash`, `chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUES (%s, %s, %s, %s, %s, %s, %s)",
 			(
 				h,
 				str(chat_id),
@@ -122,12 +175,13 @@ class history_index_class(object):
 				str(from_user),
 				str(forward_user),
 				text,
+				datetime.datetime.fromtimestamp(msg.date).strftime('%Y-%m-%d %H:%M:%S')
 				#repr(json.loads(str(msg)))
 			)
 		)
 		self.conn.commit()
 
-	def user_profile_track(self, msg: Message):
+	def _user_profile_track(self, msg: Message):
 		if not msg.outgoing and msg.chat.type != 'private' and msg.from_user:
 			self.insert_user_profile(msg.from_user)
 		if msg.forward_from:
@@ -136,10 +190,14 @@ class history_index_class(object):
 			self.insert_user_profile(msg.forward_from_chat)
 		self.insert_user_profile(msg.chat)
 
+	def user_profile_track(self, msg: Message):
+		with self._lock_user:
+			self._user_profile_track(msg)
+
 	def insert_user_profile(self, user: User):
 		try:
 			u = user_profile(user)
-			sqlObj = self.conn.query1("SELECT `hash` FROM `user_history` WHERE `user_id` = {} ORDER BY `_id` DESC LIMIT 1".format(user.id))
+			sqlObj = self.conn.query1("SELECT `hash` FROM `user_history` WHERE `user_id` = %s ORDER BY `_id` DESC LIMIT 1", (user.id,))
 			if sqlObj is None or u.hash != sqlObj['hash']:
 				self.conn.execute(*u.sql_insert)
 		except:
