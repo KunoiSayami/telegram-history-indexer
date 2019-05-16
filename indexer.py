@@ -1,41 +1,25 @@
-# -*- coding: utf-8 -*-
-# main.py
-# Copyright (C) 2018-2019 KunoiSayami
-#
-# This module is part of telegram-history-indexer and is released under
-# the AGPL v3 License: https://www.gnu.org/licenses/agpl-3.0.txt
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
 from libpy3.mysqldb import mysqldb
 import json
+import pymysql
 from configparser import ConfigParser
 from pyrogram import Client, Message, User, MessageHandler, Chat
 import hashlib
+import warnings
 import traceback
 
 class user_profile(object):
-	def __init__(self, user: User or Chat):
+	def __init__(self, user: User or Chat or None):
 		self.user_id = user.id
 		self.username = user.username if user.username else None
 		self.photo_id = user.photo.big_file_id if user.photo else None
+		self._photo_id = self.photo_id if self.photo_id else ''
 
-		if isinstance(user, User):
+		if isinstance(user, Chat) and user.type != 'private':
+			self.full_name = user.title
+		else:
 			self.first_name = user.first_name
 			self.last_name = user.last_name if user.last_name else None
 			self.full_name = '{} {}'.format(self.first_name, self.last_name) if self.last_name else self.first_name
-		else:
-			self.full_name = user.title
 
 		self.hash = hashlib.sha256(','.join((
 			str(self.user_id),
@@ -129,10 +113,10 @@ class history_index_class(object):
 			self.conn.execute("UPDATE `index` SET `text` = %s WHERE `_id` = %s", (text, str(sqlObj['_id'])))
 			return
 		chat_id = msg.chat.id
-		from_user = msg.from_user.id
+		from_user = msg.from_user.id if msg.from_user else msg.chat.id
 		msg = self.drop_useless_part(msg)
 		self.conn.execute(
-			"INSERT INTO `index` (`hash`, `chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `origin_json`) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+			"INSERT INTO `index` (`hash`, `chat_id`, `message_id`, `from_user`, `forward_from`, `text`) VALUES (%s, %s, %s, %s, %s, %s)",
 			(
 				h,
 				str(chat_id),
@@ -140,13 +124,13 @@ class history_index_class(object):
 				str(from_user),
 				str(forward_user),
 				text,
-				repr(json.loads(str(msg)))
+				#repr(json.loads(str(msg)))
 			)
 		)
 		self.conn.commit()
 
 	def user_profile_track(self, msg: Message):
-		if not msg.outgoing:
+		if not msg.outgoing and msg.chat.type != 'private' and msg.from_user:
 			self.insert_user_profile(msg.from_user)
 		if msg.forward_from:
 			self.insert_user_profile(msg.forward_from)
