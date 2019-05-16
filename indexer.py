@@ -1,10 +1,8 @@
 from libpy3.mysqldb import mysqldb
 import json
-import pymysql
 from configparser import ConfigParser
 from pyrogram import Client, Message, User, MessageHandler, Chat
 import hashlib
-import warnings
 import traceback
 
 class user_profile(object):
