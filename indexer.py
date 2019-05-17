@@ -158,8 +158,8 @@ class history_index_class(object):
 		if text == '' or text.startswith('/') and not text.startswith('//'): # May log any message in the future
 			return
 		forward_user = msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else 0
-		h = self.get_hash(msg)
-		sqlObj = self.conn.query1("SELECT `_id` FROM `index` WHERE `hash` = %s", (h,))
+		#h = self.get_hash(msg)
+		sqlObj = self.conn.query1("SELECT `_id` FROM `index` WHERE `chat_id` = %s, `message_id` = %s", map(str, (msg.chat.id, msg.message_id)))
 		if sqlObj is not None:
 			self.conn.execute("UPDATE `index` SET `text` = %s WHERE `_id` = %s", (text, str(sqlObj['_id'])))
 			return
@@ -167,9 +167,9 @@ class history_index_class(object):
 		from_user = msg.from_user.id if msg.from_user else msg.chat.id
 		msg = self.drop_useless_part(msg)
 		self.conn.execute(
-			"INSERT INTO `index` (`hash`, `chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+			"INSERT INTO `index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUES (%s, %s, %s, %s, %s, %s)",
 			(
-				h,
+				#h,
 				str(chat_id),
 				str(msg.message_id),
 				str(from_user),
