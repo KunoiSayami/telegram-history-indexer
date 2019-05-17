@@ -17,12 +17,21 @@ CREATE TABLE IF NOT EXISTS `index` (
   PRIMARY KEY (`_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Dumping structure for table username_history
+DROP TABLE IF EXISTS `username_history`;
+CREATE TABLE IF NOT EXISTS `username_history` (
+  `_id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) NOT NULL,
+  `username` varchar(32) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Dumping structure for table user_history
 DROP TABLE IF EXISTS `user_history`;
 CREATE TABLE IF NOT EXISTS `user_history` (
   `_id` int(11) NOT NULL AUTO_INCREMENT,
   `user_id` bigint(20) NOT NULL,
-  `username` varchar(32) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `first_name` varchar(256) COLLATE utf8mb4_unicode_ci NOT NULL,
   `last_name` varchar(256) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `photo_id` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'big_file_id',
