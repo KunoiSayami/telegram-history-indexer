@@ -25,7 +25,7 @@ import pyrogram
 import hashlib
 import warnings
 import threading
-import datetime
+import time
 
 class bot_search_helper(object):
 
@@ -118,29 +118,47 @@ class bot_search_helper(object):
 		args = msg.text.split()
 		if len(args) == 1:
 			return msg.reply('Please use `/sm <msg_text1> [<msg_text2> <msg_text3> ...]` to search database', True)
+
 		args = args[1:]
 		args.sort()
-		if self.check_duplicate_msg_history_search_request(args) and not self.force_query:
-			pass
-		search_id = self.insert_msg_query_history(args)
-		args = ['%{}%'.format(x) for x in args]
-		sqlStr = ' AND '.join('`text` LIKE %s' for x in args) if len(args) > 1 else '`text` LIKE %s'
-		max_count = self.conn.query1("SELECT COUNT(*) AS `count` FROM `index` WHERE {} ORDER BY `timestamp` DESC LIMIT 0, 5".format(sqlStr), args)['count']
-		sqlObj = self.conn.query("SELECT * FROM `index` WHERE {} ORDER BY `timestamp` DESC LIMIT 0, 5".format(sqlStr), args)
+
+		search_check = self.check_duplicate_msg_history_search_request(args)
+		search_id = self.insert_msg_query_history(args) if search_check is None else search_check['_id']
+
+		text, max_count = self.query_message_history(args)
 		if max_count:
-			msg.reply('\n'.join(self.show_query_msg_result(x) for x in sqlObj), parse_mode = 'html', reply_markup = InlineKeyboardMarkup( inline_keyboard = [
+			msg.reply(text, parse_mode = 'html', reply_markup = InlineKeyboardMarkup( inline_keyboard = [
 				[InlineKeyboardButton(text = 'Next', callback_data = 'msg n {} 0 {}'.format(search_id, max_count).encode())],
-				[InlineKeyboardButton(text = 'Research', callback_data = 'msg r {}'.format(search_id).encode())]
+				[InlineKeyboardButton(text = 'Re-search', callback_data = 'msg r {}'.format(search_id).encode())]
 			]))
 		else:
-			msg.reply('Empty', True)
+			msg.reply(text, True)
+
+	def query_message_history(self, args: list, step: int = 0):
+		'''need passing origin args to this function'''
+		args = ['%{}%'.format(x) for x in args]
+		sqlStr = ' AND '.join('`text` LIKE %s' for x in args) if len(args) > 1 else '`text` LIKE %s'
+		#`chat_id`, `from_user`, `message_id`, `text`, `timestamp`
+		max_count = self.conn.query1("SELECT COUNT(*) AS `count` FROM `index` WHERE {} AND {}".format(sqlStr, self.settings_to_sql_options()), args)['count']
+		if max_count:
+			sqlObj = self.conn.query("SELECT * FROM `index` WHERE {} AND {} ORDER BY `timestamp` DESC LIMIT {}, 5".format(sqlStr, self.settings_to_sql_options(), step), args)
+			return '{3}\n\nPage: {0} / {1}\nLast_query: <code>{2}</code>'.format(
+				(step // 5) + 1,
+				(max_count // 5) + 1,
+				time.strftime('%Y-%m-%d %H:%M:%S'),
+				'\n'.join(self.show_query_msg_result(x) for x in sqlObj)
+			), max_count
+		return 'Empty', 0
+
+	def settings_to_sql_options(self):
+		return ' 1 = 1 '
 
 	def show_query_msg_result(self, d: dict):
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
 		return ('<b>Chat id</b>: <code>{chat_id}</code>\n' + \
 			'<b>From user</b>: <code>{from_user}</code>\n' + \
 			'<b>Message id</b>: <code>{message_id}</code>\n' + \
-			'<b>Timestamp</b>: {timestamp}'
+			'<b>Timestamp</b>: <code>{timestamp}</code>\n'
 			'<b>Text</b>:\n<pre>{text}</pre>\n').format(**d)
 
 	def handle_query_callback(self, client: Client, msg: CallbackQuery):
@@ -156,13 +174,41 @@ class bot_search_helper(object):
 		msg.data = msg.data.decode()
 		if msg.data.startswith('msg'):
 			datagroup = msg.data.split()
-			if datagroup[1] == 'n':
-				pass
-			elif datagroup[1] == 'b':
-				pass
-			elif datagroup[1] == 'r':
-				pass
+			if datagroup[1] in ('n', 'b', 'r'):
+				sqlObj = self.get_msg_search_history(datagroup[2])
+				args = eval(sqlObj['args'])
+				step = (int(datagroup[3]) + (5 if datagroup[1] == 'n' else -5)) if datagroup[1] != 'r' else 0
+				text, max_index = self.query_message_history(args, step)
+				if datagroup[1] != 'r':
+					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]))
+				else:
+					reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index)
+				msg.message.edit(
+					text,
+					parse_mode = 'html',
+					reply_markup = reply_markup
+				)
 		msg.answer()
+
+	@staticmethod
+	def generate_message_search_keyboard(mode: str, search_id: int, current_index: int, max_index: int):
+		current_index += 5 if mode == 'n' else -5 if mode == 'b' else 0
+		kb = [
+			[
+				InlineKeyboardButton(text = 'Back', callback_data = 'msg b {} {} {}'.format(search_id, current_index, max_index).encode()),
+				InlineKeyboardButton(text = 'Next', callback_data = 'msg n {} {} {}'.format(search_id, current_index, max_index).encode())
+			],
+			[
+				InlineKeyboardButton(text = 'Re-search', callback_data = 'msg r {}'.format(search_id).encode()),
+			]
+		]
+		if current_index + 5 > max_index:
+			kb[0].pop(1)
+		if current_index == 0:
+			kb[0].pop(0)
+		if len(kb[0]) == 0:
+			kb.pop(0)
+		return InlineKeyboardMarkup( inline_keyboard = kb)
 
 	def insert_msg_query_history(self, args: list):
 		with self.query_lock:
@@ -170,7 +216,10 @@ class bot_search_helper(object):
 			return self.conn.query1("SELECT `_id` FROM `search_history` ORDER BY `_id` DESC LIMIT 1")['_id']
 
 	def check_duplicate_msg_history_search_request(self, args: list):
-		return self.conn.query1("SELECT * FROM `search_history` WHERE `hash` = %s", self.get_msg_query_hash(args))
+		return self.conn.query1("SELECT `_id` FROM `search_history` WHERE `hash` = %s", self.get_msg_query_hash(args))
+
+	def get_msg_search_history(self, _id: int):
+		return self.conn.query1("SELECT `args`, `timestamp` FROM `search_history` WHERE `_id` = %s", (_id,))
 
 	@staticmethod
 	def get_msg_query_hash(args: list):

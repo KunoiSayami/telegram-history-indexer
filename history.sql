@@ -17,6 +17,31 @@ CREATE TABLE IF NOT EXISTS `index` (
   PRIMARY KEY (`_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Dumping structure for table search_history
+DROP TABLE IF EXISTS `search_history`;
+CREATE TABLE IF NOT EXISTS `search_history` (
+  `_id` int(11) NOT NULL AUTO_INCREMENT,
+  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `args` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `hash` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  PRIMARY KEY (`_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Dumping structure for table settings
+DROP TABLE IF EXISTS `settings`;
+CREATE TABLE IF NOT EXISTS `settings` (
+  `user_id` bigint(20) NOT NULL COMMENT 'reserved',
+  `force_query` enum('Y','N') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'N',
+  `only_user` enum('Y','N') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'N',
+  `only_group` enum('Y','N') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'N',
+  `include_forward` enum('Y','N') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'N',
+  `include_bot` enum('Y','N') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'N',
+  `is_specify_id` enum('Y','N') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'N',
+  `is_specify_chat` enum('Y','N') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'N',
+  `specify_id` bigint(20) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Dumping structure for table username_history
 DROP TABLE IF EXISTS `username_history`;
 CREATE TABLE IF NOT EXISTS `username_history` (
