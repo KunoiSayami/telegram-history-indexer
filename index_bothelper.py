@@ -127,10 +127,7 @@ class bot_search_helper(object):
 
 		text, max_count = self.query_message_history(args)
 		if max_count:
-			msg.reply(text, parse_mode = 'html', reply_markup = InlineKeyboardMarkup( inline_keyboard = [
-				[InlineKeyboardButton(text = 'Next', callback_data = 'msg n {} 0 {}'.format(search_id, max_count).encode())],
-				[InlineKeyboardButton(text = 'Re-search', callback_data = 'msg r {}'.format(search_id).encode())]
-			]))
+			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count))
 		else:
 			msg.reply(text, True)
 
