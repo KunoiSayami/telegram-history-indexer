@@ -34,8 +34,8 @@ class bot_search_helper(object):
 		self.force_query = None
 		self.only_user = None
 		self.only_group = None
-		self.include_forward = None
-		self.include_bot = None
+		self.except_forward = None
+		self.except_bot = None
 		self.is_specify_id = None
 		self.is_specify_chat = None
 		self.specify_id = 0
@@ -75,7 +75,6 @@ class bot_search_helper(object):
 		self.initialize_setting()
 		self.bot.start()
 
-
 	def handle_close_keyboard(self, client: Client, msg: Message):
 		if msg.reply_to_message.from_user.is_self:
 			client.edit_message_reply_markup(msg.chat.id, msg.reply_to_message.message_id)
@@ -87,11 +86,16 @@ class bot_search_helper(object):
 		if len(msggroup) == 1:
 			msg.reply('Settings:\n{}'.format(self.generate_settings()), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
 		elif len(msggroup) == 3:
-			try:
-				if msggroup[1] == 'limit':
+			if msggroup[1] == 'limit':
+				try:
 					self.set_page_limit(msggroup[2])
-			except ValueError:
-				msg.reply('use `/set limit <value>` to set page limit')
+				except ValueError:
+					msg.reply('use `/set limit <value>` to set page limit')
+			elif msggroup[1] == 'id':
+				try:
+					self.specify_id = int(msggroup[2])
+				except ValueError:
+					msg.reply('use `/set id <value>` to set specify id')
 			self.update_setting()
 
 	def initialize_setting(self, init: bool = True):
@@ -111,11 +115,11 @@ class bot_search_helper(object):
 	def update_setting(self):
 		self.conn.execute(
 			"UPDATE `settings` "
-			"SET `force_query` = %s, `only_user` = %s, `only_group` = %s, `include_forward` = %s,"
-			" `include_bot` = %s, `is_specify_id` = %s, `is_specify_chat` = %s, `specify_id` = %s, `page_limit` = %s "
+			"SET `force_query` = %s, `only_user` = %s, `only_group` = %s, `except_forward` = %s,"
+			" `except_bot` = %s, `is_specify_id` = %s, `is_specify_chat` = %s, `specify_id` = %s, `page_limit` = %s "
 			"WHERE `user_id` = %s",
 			[self._getbool_reversed(x) for x in (
-				self.force_query, self.only_user, self.only_group, self.include_forward, self.include_bot,
+				self.force_query, self.only_user, self.only_group, self.except_forward, self.except_bot,
 				self.is_specify_id, self.is_specify_chat, self.specify_id, self.page_limit, self.owner
 			)]
 		)
@@ -130,17 +134,16 @@ class bot_search_helper(object):
 			self.page_limit = limit
 
 	def generate_settings(self):
-		return (
-			'<b>Current user id:</b> <code>{owner}</code>\n' 
-			'\n<b>Force Query:</b> <code>{force_query}</code>\n'
-			'<b>Result each page:</b> <code>{page_limit}</code>\n'
-			'<b>Only user:</b> <code>{only_user}</code>\n'
-			'<b>Only group:</b> <code>{only_group}</code>\n'
-			'<b>Include forward:</b> <code>{include_forward}</code>\n'
-			'<b>Include bot:</b> <code>{include_bot}</code>\n'
-			'<b>Use specify id:</b> <code>{is_specify_id}</code>\n'
-			'<b>Specify id is chat:</b> <code>{is_specify_chat}</code>\n'
-			'<b>Specify id:</b> <code>{specify_id}</code>\n\n'
+		return ('<b>Current user id:</b> <code>{owner}</code>\n' + \
+			'\n<b>Force Query:</b> <code>{force_query}</code>\n'+ \
+			'<b>Result each page:</b> <code>{page_limit}</code>\n'+ \
+			'<b>Only user:</b> <code>{only_user}</code>\n'+ \
+			'<b>Only group:</b> <code>{only_group}</code>\n'+ \
+			'<b>Except forward:</b> <code>{except_forward}</code>\n'+ \
+			'<b>Except bot:</b> <code>{except_bot}</code>\n'+ \
+			'<b>Use specify id:</b> <code>{is_specify_id}</code>\n'+ \
+			'<b>Specify id is chat:</b> <code>{is_specify_chat}</code>\n'+ \
+			'<b>Specify id:</b> <code>{specify_id}</code>\n\n' + \
 			'<b>Last refresh:</b> ' + time.strftime('<code>%Y-%m-%d %H:%M:%S</code>')
 			).format(
 				**{x: getattr(self, x, None) for x in dir(self)}
@@ -148,6 +151,14 @@ class bot_search_helper(object):
 
 	def generate_settings_keyboard(self):
 		return InlineKeyboardMarkup( inline_keyboard = [
+			[
+				InlineKeyboardButton(text = 'user only', callback_data = b'set only user'),
+				InlineKeyboardButton(text = 'group only', callback_data = b'set only group')
+			],
+			[
+				InlineKeyboardButton(text = 'user specify id', callback_data = b'set specify toggle'),
+				InlineKeyboardButton(text = 'specify chat', callback_data = b'set specify chat')
+			],
 			[InlineKeyboardButton(text = 'refresh', callback_data = b'set refresh')],
 			[InlineKeyboardButton(text = 'reset', callback_data = b'set reset')]
 		])
@@ -221,7 +232,24 @@ class bot_search_helper(object):
 		return 'Empty', 0
 
 	def settings_to_sql_options(self):
-		return ' 1 = 1 '
+		args = []
+
+		if self.only_group:
+			args.append('`chat_id` < 0')
+		elif self.only_user:
+			args.append('`chat_id` > 0')
+
+		if self.except_forward:
+			args.append('`forward` = 0')
+		if self.is_specify_id:
+			if self.is_specify_chat:
+				args.append('`chat_id` = {}'.format(self.specify_id))
+			else:
+				args.append('`from_user` = {}'.format(self.specify_id))
+		if len(args) == 0:
+			return '1 = 1'
+		else:
+			return ' AND '.join(args)
 
 	def show_query_msg_result(self, d: dict):
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
@@ -250,6 +278,7 @@ class bot_search_helper(object):
 		'''
 		msg.data = msg.data.decode()
 		datagroup = msg.data.split()
+
 		if datagroup[0] == 'msg':
 			if datagroup[1] in ('n', 'b', 'r'):
 				sqlObj = self.get_msg_search_history(datagroup[2])
@@ -266,15 +295,34 @@ class bot_search_helper(object):
 					reply_markup = reply_markup
 				)
 			msg.answer()
+
 		elif datagroup[0] == 'set':
 			if datagroup[1] == 'reset':
 				self.conn.execute("DELETE FROM `settings` WHERE `user_id` = %s", (msg.from_user.id,))
 				self.initialize_setting(False)
-				msg.message.edit(self.generate_settings(), 'html', reply_markup = self.generate_settings_keyboard())
+				self.refresh_settings(msg.message)
 				msg.answer('Settings has been reset!')
 			elif datagroup[1] == 'refresh':
-				msg.message.edit(self.generate_settings(), 'html', reply_markup = self.generate_settings_keyboard())
+				self.refresh_settings(msg.message)
 				msg.answer()
+			elif datagroup[1] == 'only':
+				if datagroup[2] == 'user':
+					self.only_user = not self.only_user
+				elif datagroup[2] == 'group':
+					self.only_group = not self.only_group
+				self.refresh_settings(msg.message)
+				msg.answer()
+
+			elif datagroup[1] == 'specify':
+				if datagroup[2] == 'toggle':
+					self.is_specify_id = not self.is_specify_id
+				elif datagroup[2] == 'chat':
+					self.is_specify_chat = not self.is_specify_chat
+				self.refresh_settings(msg.message)
+				msg.answer()
+
+	def refresh_settings(self, msg: Message):
+		msg.edit(self.generate_settings(), 'html', reply_markup = self.generate_settings_keyboard())
 
 	def generate_message_search_keyboard(self, mode: str, search_id: int, current_index: int, max_index: int):
 		current_index += self.page_limit if mode == 'n' else -self.page_limit if mode == 'b' else 0
