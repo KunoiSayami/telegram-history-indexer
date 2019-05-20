@@ -117,7 +117,7 @@ class history_index_class(object):
 		self.init_bot(*bot_instance)
 
 		self.client.add_handler(MessageHandler(self.handle_all_message))
-
+		
 		self.index_dialog = iter_user_messages(self)
 
 
@@ -191,13 +191,13 @@ class history_index_class(object):
 		else:
 			self.conn.execute(
 				"INSERT INTO `document_index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`, `type`, `file_id`) " + \
-				"VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+					"VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
 				(
 					msg.chat.id,
 					msg.message_id,
 					msg.from_user.id if msg.from_user else msg.chat.id,
 					msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else 0,
-					text,
+					text if len(text) > 0 else None,
 					datetime.datetime.fromtimestamp(msg.date).strftime('%Y-%m-%d %H:%M:%S'),
 					msg_type,
 					self.get_file_id(msg, msg_type)

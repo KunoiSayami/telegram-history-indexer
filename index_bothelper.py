@@ -36,8 +36,9 @@ class bot_search_helper(object):
 		self.include_forward = None
 		self.include_bot = None
 		self.is_specify_id = None
-		self.is_specify_group = None
+		self.is_specify_chat = None
 		self.specify_id = None
+		self.page_limit = None
 
 	def __init__(self, conn: mysqldb, bot_instance: Client or str, owner_id: int):
 		self.__preinit()
@@ -66,22 +67,30 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_search_user_history, Filters.private & Filters.chat(self.owner) & Filters.command('su')))
 		self.bot.add_handler(MessageHandler(self.handle_search_message_history, Filters.private & Filters.chat(self.owner) & Filters.command('sm')))
 		self.bot.add_handler(MessageHandler(self.handle_accurate_search_user, Filters.private & Filters.chat(self.owner) & Filters.command('ua')))
-		self.bot.add_handler(MessageHandler(self.handle_accurate_search_user, Filters.private & Filters.chat(self.owner) & Filters.command('ua')))
+		self.bot.add_handler(MessageHandler(self.handle_setting, Filters.private & Filters.chat(self.owner) & Filters.command('set')))
+		self.bot.add_handler(MessageHandler(self.handle_close_keyboard, Filters.private & Filters.chat(self.owner) & Filters.command('close')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
 
 		self.initialize_setting()
 		self.bot.start()
 
-	def handle_setting(self, client: Client, msg: Message):
-		msg.reply('Settings: {}'.format(self.generate_settings()))
+	def handle_close_keyboard(self, client: Client, msg: Message):
+		if msg.reply_to_message.from_user.is_self:
+			client.edit_message_reply_markup(msg.chat.id, msg.reply_to_message.message_id)
+		else:
+			msg.reply('Oops! Something wrong!', True)
 
-	def initialize_setting(self):
+	def handle_setting(self, client: Client, msg: Message):
+		msg.reply('Settings:\n{}'.format(self.generate_settings()), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
+
+	def initialize_setting(self, init: bool = True):
 		sqlObj = self.conn.query1("SELECT * FROM `settings` WHERE `user_id` = %s", self.owner)
 		if sqlObj is None:
-			warnings.warn(
-				'bot settings not found, try create a new one',
-				RuntimeWarning
-			)
+			if init:
+				warnings.warn(
+					'bot settings not found, try create a new one',
+					RuntimeWarning
+				)
 			self.conn.execute("INSERT INTO `settings` (`user_id`) VALUE (%s)", self.owner)
 			return self.initialize_setting()
 		sqlObj.pop('user_id')
@@ -96,17 +105,26 @@ class bot_search_helper(object):
 			return s
 
 	def generate_settings(self):
-		return ('<b> Current user id:</b> <code>{owner}</code>\n' + \
+		return ('<b>Current user id:</b> <code>{owner}</code>\n' + \
 			'\n<b>Force Query:</b> <code>{force_query}</code>\n'+ \
+			'<b>Result each page:</b> <code>{page_limit}</code>\n'+ \
 			'<b>Only user:</b> <code>{only_user}</code>\n'+ \
 			'<b>Only group:</b> <code>{only_group}</code>\n'+ \
 			'<b>Include forward:</b> <code>{include_forward}</code>\n'+ \
 			'<b>Include bot:</b> <code>{include_bot}</code>\n'+ \
 			'<b>Use specify id:</b> <code>{is_specify_id}</code>\n'+ \
-			'<b>Specify id is chat:</b> <code>{is_specify_group}</code>\n'+ \
-			'<b>Specify id:</b> <code>{specify_id}</code>\n').format(
+			'<b>Specify id is chat:</b> <code>{is_specify_chat}</code>\n'+ \
+			'<b>Specify id:</b> <code>{specify_id}</code>\n\n' + \
+			'<b>Last refresh:</b> ' + time.strftime('<code>%Y-%m-%d %H:%M:%S</code>')
+			).format(
 				**{x: getattr(self, x, None) for x in dir(self)}
 			)
+
+	def generate_settings_keyboard(self):
+		return InlineKeyboardMarkup( inline_keyboard = [
+			[InlineKeyboardButton(text = 'refresh', callback_data = b'set refresh')],
+			[InlineKeyboardButton(text = 'reset', callback_data = b'set reset')]
+		])
 
 	def handle_search_user_history(self, client: Client, msg: Message):
 		pass
@@ -134,8 +152,7 @@ class bot_search_helper(object):
 	def query_message_history(self, args: list, step: int = 0):
 		'''need passing origin args to this function'''
 		args = ['%{}%'.format(x) for x in args]
-		sqlStr = ' AND '.join('`text` LIKE %s' for x in args) if len(args) > 1 else '`text` LIKE %s'
-		#`chat_id`, `from_user`, `message_id`, `text`, `timestamp`
+		sqlStr = ' AND '.join('`text` LIKE %s' for x in args)
 		max_count = self.conn.query1("SELECT COUNT(*) AS `count` FROM `index` WHERE {} AND {}".format(sqlStr, self.settings_to_sql_options()), args)['count']
 		if max_count:
 			sqlObj = self.conn.query("SELECT * FROM `index` WHERE {} AND {} ORDER BY `timestamp` DESC LIMIT {}, 5".format(sqlStr, self.settings_to_sql_options(), step), args)
@@ -169,8 +186,8 @@ class bot_search_helper(object):
 		<max index id>
 		'''
 		msg.data = msg.data.decode()
-		if msg.data.startswith('msg'):
-			datagroup = msg.data.split()
+		datagroup = msg.data.split()
+		if datagroup[0] == 'msg':
 			if datagroup[1] in ('n', 'b', 'r'):
 				sqlObj = self.get_msg_search_history(datagroup[2])
 				args = eval(sqlObj['args'])
@@ -185,7 +202,16 @@ class bot_search_helper(object):
 					parse_mode = 'html',
 					reply_markup = reply_markup
 				)
-		msg.answer()
+			msg.answer()
+		elif datagroup[0] == 'set':
+			if datagroup[1] == 'reset':
+				self.conn.execute("DELETE FROM `settings` WHERE `user_id` = %s", (msg.from_user.id,))
+				self.initialize_setting(False)
+				msg.message.edit(self.generate_settings(), 'html', reply_markup = self.generate_settings_keyboard())
+				msg.answer('Settings has been reset!')
+			elif datagroup[1] == 'refresh':
+				msg.message.edit(self.generate_settings(), 'html', reply_markup = self.generate_settings_keyboard())
+				msg.answer()
 
 	@staticmethod
 	def generate_message_search_keyboard(mode: str, search_id: int, current_index: int, max_index: int):
@@ -205,7 +231,7 @@ class bot_search_helper(object):
 			kb[0].pop(0)
 		if len(kb[0]) == 0:
 			kb.pop(0)
-		return InlineKeyboardMarkup( inline_keyboard = kb)
+		return InlineKeyboardMarkup(inline_keyboard = kb)
 
 	def insert_msg_query_history(self, args: list):
 		with self.query_lock:
