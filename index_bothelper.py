@@ -26,6 +26,7 @@ import hashlib
 import warnings
 import threading
 import time
+import datetime
 
 class bot_search_helper(object):
 
@@ -37,8 +38,8 @@ class bot_search_helper(object):
 		self.include_bot = None
 		self.is_specify_id = None
 		self.is_specify_chat = None
-		self.specify_id = None
-		self.page_limit = None
+		self.specify_id = 0
+		self.page_limit = 5
 
 	def __init__(self, conn: mysqldb, bot_instance: Client or str, owner_id: int):
 		self.__preinit()
@@ -74,6 +75,7 @@ class bot_search_helper(object):
 		self.initialize_setting()
 		self.bot.start()
 
+
 	def handle_close_keyboard(self, client: Client, msg: Message):
 		if msg.reply_to_message.from_user.is_self:
 			client.edit_message_reply_markup(msg.chat.id, msg.reply_to_message.message_id)
@@ -81,7 +83,16 @@ class bot_search_helper(object):
 			msg.reply('Oops! Something wrong!', True)
 
 	def handle_setting(self, client: Client, msg: Message):
-		msg.reply('Settings:\n{}'.format(self.generate_settings()), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
+		msggroup = msg.text.split()
+		if len(msggroup) == 1:
+			msg.reply('Settings:\n{}'.format(self.generate_settings()), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
+		elif len(msggroup) == 3:
+			try:
+				if msggroup[1] == 'limit':
+					self.set_page_limit(msggroup[2])
+			except ValueError:
+				msg.reply('use `/set limit <value>` to set page limit')
+			self.update_setting()
 
 	def initialize_setting(self, init: bool = True):
 		sqlObj = self.conn.query1("SELECT * FROM `settings` WHERE `user_id` = %s", self.owner)
@@ -97,24 +108,39 @@ class bot_search_helper(object):
 		for key, value in sqlObj.items():
 			self.__setattr__(key, self._getbool(value))
 
-	@staticmethod
-	def _getbool(s):
-		if isinstance(s, str):
-			return s == 'Y'
+	def update_setting(self):
+		self.conn.execute(
+			"UPDATE `settings` "
+			"SET `force_query` = %s, `only_user` = %s, `only_group` = %s, `include_forward` = %s,"
+			" `include_bot` = %s, `is_specify_id` = %s, `is_specify_chat` = %s, `specify_id` = %s, `page_limit` = %s "
+			"WHERE `user_id` = %s",
+			[self._getbool_reversed(x) for x in (
+				self.force_query, self.only_user, self.only_group, self.include_forward, self.include_bot,
+				self.is_specify_id, self.is_specify_chat, self.specify_id, self.page_limit, self.owner
+			)]
+		)
+
+	def set_page_limit(self, limit: int):
+		limit = int(limit)
+		if limit > 5:
+			self.page_limit = 5
+		elif limit < 1:
+			self.page_limit = 1
 		else:
-			return s
+			self.page_limit = limit
 
 	def generate_settings(self):
-		return ('<b>Current user id:</b> <code>{owner}</code>\n' + \
-			'\n<b>Force Query:</b> <code>{force_query}</code>\n'+ \
-			'<b>Result each page:</b> <code>{page_limit}</code>\n'+ \
-			'<b>Only user:</b> <code>{only_user}</code>\n'+ \
-			'<b>Only group:</b> <code>{only_group}</code>\n'+ \
-			'<b>Include forward:</b> <code>{include_forward}</code>\n'+ \
-			'<b>Include bot:</b> <code>{include_bot}</code>\n'+ \
-			'<b>Use specify id:</b> <code>{is_specify_id}</code>\n'+ \
-			'<b>Specify id is chat:</b> <code>{is_specify_chat}</code>\n'+ \
-			'<b>Specify id:</b> <code>{specify_id}</code>\n\n' + \
+		return (
+			'<b>Current user id:</b> <code>{owner}</code>\n' 
+			'\n<b>Force Query:</b> <code>{force_query}</code>\n'
+			'<b>Result each page:</b> <code>{page_limit}</code>\n'
+			'<b>Only user:</b> <code>{only_user}</code>\n'
+			'<b>Only group:</b> <code>{only_group}</code>\n'
+			'<b>Include forward:</b> <code>{include_forward}</code>\n'
+			'<b>Include bot:</b> <code>{include_bot}</code>\n'
+			'<b>Use specify id:</b> <code>{is_specify_id}</code>\n'
+			'<b>Specify id is chat:</b> <code>{is_specify_chat}</code>\n'
+			'<b>Specify id:</b> <code>{specify_id}</code>\n\n'
 			'<b>Last refresh:</b> ' + time.strftime('<code>%Y-%m-%d %H:%M:%S</code>')
 			).format(
 				**{x: getattr(self, x, None) for x in dir(self)}
@@ -130,7 +156,25 @@ class bot_search_helper(object):
 		pass
 
 	def handle_accurate_search_user(self, client: Client, msg: Message):
-		pass
+		args = msg.text.split()
+		if len(args) == 1:
+			return msg.reply('Please use `/su <user_id>` to search database', True)
+
+		sqlObj = self.conn.query1("SELECT * FROM `user_history` WHERE `user_id` = %s", args[1:])
+		if sqlObj is None:
+			return msg.reply('Sorry, We can\'t found this user.', True)
+		if sqlObj['photo_id']:
+			client.send_photo(msg.chat.id, sqlObj['photo_id'], self.generate_user_info(sqlObj), 'html')
+		else:
+			msg.reply(self.generate_user_info(sqlObj), parse_mode = 'html')
+
+	def generate_user_info(self, user_sqlObj: dict):
+		return (
+			'<b>User id</b>: <code>{user_id}</code>\n'
+			'<b>First name</b>: <code>{first_name}</code>\n'
+			'<b>Last name</b>: <code>{user_id}</code>\n' if user_sqlObj['last_name'] else ''
+			'<b>Last update</b>: <code>{last_update}</code>\n'
+		).format(**user_sqlObj)
 
 	def handle_search_message_history(self, client: Client, msg: Message):
 		args = msg.text.split()
@@ -149,16 +193,28 @@ class bot_search_helper(object):
 		else:
 			msg.reply(text, True)
 
-	def query_message_history(self, args: list, step: int = 0):
+	def query_message_history(self, args: list, step: int = 0, timestamp: str or datetime.datetime = ''):
 		'''need passing origin args to this function'''
 		args = ['%{}%'.format(x) for x in args]
 		sqlStr = ' AND '.join('`text` LIKE %s' for x in args)
+
+		if isinstance(timestamp, datetime.datetime):
+			timestamp = ' AND `timetsamp` < {}'.format(timestamp.strftime('%Y-%m-%d %H:%M:%S'))
+		elif timestamp != '':
+			timestamp = ' AND `timetsamp` < {}'.format(timestamp)
+
 		max_count = self.conn.query1("SELECT COUNT(*) AS `count` FROM `index` WHERE {} AND {}".format(sqlStr, self.settings_to_sql_options()), args)['count']
 		if max_count:
-			sqlObj = self.conn.query("SELECT * FROM `index` WHERE {} AND {} ORDER BY `timestamp` DESC LIMIT {}, 5".format(sqlStr, self.settings_to_sql_options(), step), args)
+			sqlObj = self.conn.query("SELECT * FROM `index` WHERE {0} AND {1} {4} ORDER BY `timestamp` DESC LIMIT {2}, {3}".format(
+					sqlStr,
+					self.settings_to_sql_options(),
+					step,
+					self.page_limit,
+					timestamp
+				), args)
 			return '{3}\n\nPage: {0} / {1}\nLast_query: <code>{2}</code>'.format(
-				(step // 5) + 1,
-				(max_count // 5) + 1,
+				(step // self.page_limit) + 1,
+				(max_count // self.page_limit) + 1,
 				time.strftime('%Y-%m-%d %H:%M:%S'),
 				'\n'.join(self.show_query_msg_result(x) for x in sqlObj)
 			), max_count
@@ -169,21 +225,28 @@ class bot_search_helper(object):
 
 	def show_query_msg_result(self, d: dict):
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-		return ('<b>Chat id</b>: <code>{chat_id}</code>\n' + \
-			'<b>From user</b>: <code>{from_user}</code>\n' + \
-			'<b>Message id</b>: <code>{message_id}</code>\n' + \
+		if len(d['text']) > 800: # prevert message too long
+			d['text'] = d['text'][:880] + '...'
+		d['forward_info'] = '<b>Forward From</b>: <code>{}</code>\n'.format(d['forward_from']) if d['forward_from'] else ''
+
+		return (
+			'<b>Chat id</b>: <code>{chat_id}</code>\n'
+			'<b>From user</b>: <code>{from_user}</code>\n'
+			'<b>Message id</b>: <code>{message_id}</code>\n'
 			'<b>Timestamp</b>: <code>{timestamp}</code>\n'
-			'<b>Text</b>:\n<pre>{text}</pre>\n').format(**d)
+			'{forward_info}'
+			'<b>Text</b>:\n<pre>{text}</pre>\n'
+		).format(**d)
 
 	def handle_query_callback(self, client: Client, msg: CallbackQuery):
 		'''
-		Callback data structure:
-		<main command>: like `msg'
-		<sub command>: like `n' means next page
-							`b' means back page
-		<search id>: search sql store in database
-		<current index id>
-		<max index id>
+			Callback data structure:
+			<main command>: like `msg'
+			<sub command>: like `n' means next page
+								`b' means back page
+			<search id>: search sql store in database
+			<current index id>
+			<max index id>
 		'''
 		msg.data = msg.data.decode()
 		datagroup = msg.data.split()
@@ -191,7 +254,7 @@ class bot_search_helper(object):
 			if datagroup[1] in ('n', 'b', 'r'):
 				sqlObj = self.get_msg_search_history(datagroup[2])
 				args = eval(sqlObj['args'])
-				step = (int(datagroup[3]) + (5 if datagroup[1] == 'n' else -5)) if datagroup[1] != 'r' else 0
+				step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
 				text, max_index = self.query_message_history(args, step)
 				if datagroup[1] != 'r':
 					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]))
@@ -213,9 +276,8 @@ class bot_search_helper(object):
 				msg.message.edit(self.generate_settings(), 'html', reply_markup = self.generate_settings_keyboard())
 				msg.answer()
 
-	@staticmethod
-	def generate_message_search_keyboard(mode: str, search_id: int, current_index: int, max_index: int):
-		current_index += 5 if mode == 'n' else -5 if mode == 'b' else 0
+	def generate_message_search_keyboard(self, mode: str, search_id: int, current_index: int, max_index: int):
+		current_index += self.page_limit if mode == 'n' else -self.page_limit if mode == 'b' else 0
 		kb = [
 			[
 				InlineKeyboardButton(text = 'Back', callback_data = 'msg b {} {} {}'.format(search_id, current_index, max_index).encode()),
@@ -225,7 +287,7 @@ class bot_search_helper(object):
 				InlineKeyboardButton(text = 'Re-search', callback_data = 'msg r {}'.format(search_id).encode()),
 			]
 		]
-		if current_index + 5 > max_index:
+		if current_index + self.page_limit > max_index:
 			kb[0].pop(1)
 		if current_index == 0:
 			kb[0].pop(0)
@@ -247,6 +309,20 @@ class bot_search_helper(object):
 	@staticmethod
 	def get_msg_query_hash(args: list):
 		return hashlib.sha256(repr(args).encode()).hexdigest()
+
+	@staticmethod
+	def _getbool(s):
+		if isinstance(s, str):
+			return s == 'Y'
+		else:
+			return s
+
+	@staticmethod
+	def _getbool_reversed(s):
+		if isinstance(s, bool):
+			return 'Y' if s else 'N'
+		else:
+			return s
 
 	def stop(self):
 		return self.bot.stop()
