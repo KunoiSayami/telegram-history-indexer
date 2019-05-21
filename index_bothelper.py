@@ -27,6 +27,22 @@ import warnings
 import threading
 import time
 import datetime
+import os
+import math
+
+class user(object):
+	def __init__(self, user_id: int, first_name: str, last_name: str or None = None, photo_id: str or None = None, **kwargs):
+		self.user_id = user_id
+		self.first_name = first_name
+		self.last_name = last_name
+		self.full_name = '{} {}'.format(first_name, last_name) if last_name else first_name
+		self.photo_id = photo_id
+	def get_dict(self):
+		return {'user_id': self.user_id, 'full_name': self.full_name}
+	def __hash__(self):
+		return hash(self.user_id)
+	def __eq__(self, userObj):
+		return self.user_id == userObj.user_id
 
 class bot_search_helper(object):
 
@@ -41,12 +57,14 @@ class bot_search_helper(object):
 		self.specify_id = 0
 		self.page_limit = 5
 
-	def __init__(self, conn: mysqldb, bot_instance: Client or str, owner_id: int):
+	def __init__(self, conn: mysqldb = None, bot_instance: Client or str = '', owner_id: int = 0):
 		self.__preinit()
 
+		self.owner = owner_id
 		if isinstance(bot_instance, Client):
 			self.bot = bot_instance
 		else:
+
 			if int(pyrogram.__version__.split('.')[1]) > 11:
 				warnings.warn(
 					'Current is not fully support 0.12.0 or above, please use pyrogram==0.11.0 instead',
@@ -55,21 +73,40 @@ class bot_search_helper(object):
 			config = ConfigParser()
 			config.read('config.ini')
 			self.bot = Client(
-				session_name = bot_instance,
+				session_name = bot_instance if bot_instance != '' else config['account']['indexbot_token'],
 				api_hash = config['account']['api_hash'],
 				api_id = config['account']['api_id']
 			)
+			self.owner = int(config['account']['owner'])
 
-		self.conn = conn
+		if conn is None:
+
+			try:
+				config
+			except NameError:
+				config = ConfigParser()
+				config.read('config.ini')
+
+			self.conn = mysqldb(
+				config['mysql']['host'],
+				config['mysql']['username'],
+				config['mysql']['passwd'],
+				config['mysql']['history_db'],
+			)
+			self.conn.do_keepalive()
+			self._init = False
+		else:
+			self.conn = conn
+			self._init = True
+
 		self.query_lock = threading.Lock()
+		self.search_lock = threading.Lock()
 
-		self.owner = owner_id
-
-		self.bot.add_handler(MessageHandler(self.handle_search_user_history, Filters.private & Filters.chat(self.owner) & Filters.command('su')))
-		self.bot.add_handler(MessageHandler(self.handle_search_message_history, Filters.private & Filters.chat(self.owner) & Filters.command('sm')))
-		self.bot.add_handler(MessageHandler(self.handle_accurate_search_user, Filters.private & Filters.chat(self.owner) & Filters.command('ua')))
-		self.bot.add_handler(MessageHandler(self.handle_setting, Filters.private & Filters.chat(self.owner) & Filters.command('set')))
-		self.bot.add_handler(MessageHandler(self.handle_close_keyboard, Filters.private & Filters.chat(self.owner) & Filters.command('close')))
+		self.bot.add_handler(MessageHandler(self.handle_search_user_history, Filters.private & Filters.user(self.owner) & Filters.command('su')))
+		self.bot.add_handler(MessageHandler(self.handle_search_message_history, Filters.private & Filters.user(self.owner) & Filters.command('sm')))
+		self.bot.add_handler(MessageHandler(self.handle_accurate_search_user, Filters.private & Filters.user(self.owner) & Filters.command('ua')))
+		self.bot.add_handler(MessageHandler(self.handle_setting, Filters.private & Filters.user(self.owner) & Filters.command('set')))
+		self.bot.add_handler(MessageHandler(self.handle_close_keyboard, Filters.private & Filters.user(self.owner) & Filters.command('close')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
 
 		self.initialize_setting()
@@ -167,26 +204,42 @@ class bot_search_helper(object):
 		])
 
 	def handle_search_user_history(self, client: Client, msg: Message):
-		pass
+		args = msg.text.split()
+		if len(args) != 2:
+			return msg.reply('Please use `/su <username>` to search database', True)
+		import json
+		args[1] = '%{}%'.format(args[1])
+		sqlObj = self.conn.query("SELECT * FROM `user_history` WHERE `first_name` LIKE %s OR `last_name` LIKE %s", (args[1], args[1]))
+		if len(sqlObj) == 0:
+			return msg.reply('Sorry, We can\'t found this user.', True)
+		msg.reply('<b>User id</b>: <b>Full name</b>\n' + self.generate_user_list(sqlObj), parse_mode = 'html')
+
+	def generate_user_list(self, sqlObjx: tuple):
+		sqlObjx = list(set(user(**x) for x in sqlObjx))
+		print([hash(x) for x in sqlObjx])
+		return '\n'.join('<code>{user_id}</code>: <pre>{full_name}</pre>'.format(
+			**sqlObj.get_dict()
+		) for sqlObj in sqlObjx)
 
 	def handle_accurate_search_user(self, client: Client, msg: Message):
 		args = msg.text.split()
-		if len(args) == 1:
-			return msg.reply('Please use `/su <user_id>` to search database', True)
+		if len(args) != 2:
+			return msg.reply('Please use `/ua <user_id>` to search database', True)
 
 		sqlObj = self.conn.query1("SELECT * FROM `user_history` WHERE `user_id` = %s", args[1:])
 		if sqlObj is None:
 			return msg.reply('Sorry, We can\'t found this user.', True)
 		if sqlObj['photo_id']:
-			client.send_photo(msg.chat.id, sqlObj['photo_id'], self.generate_user_info(sqlObj), 'html')
+			client.download_media(sqlObj['photo_id'], 'user.jpg')
+			client.send_photo(msg.chat.id, './downloads/user.jpg', self.generate_user_info(sqlObj), 'html')
 		else:
 			msg.reply(self.generate_user_info(sqlObj), parse_mode = 'html')
 
 	def generate_user_info(self, user_sqlObj: dict):
 		return (
-			'<b>User id</b>: <code>{user_id}</code>\n'
-			'<b>First name</b>: <code>{first_name}</code>\n'
-			'<b>Last name</b>: <code>{user_id}</code>\n' if user_sqlObj['last_name'] else ''
+			'<b>User id</b>: <code>{user_id}</code>\n' + \
+			'<b>First name</b>: <code>{first_name}</code>\n' + \
+			('<b>Last name</b>: <code>{last_name}</code>\n' if user_sqlObj['last_name'] else '') + \
 			'<b>Last update</b>: <code>{last_update}</code>\n'
 		).format(**user_sqlObj)
 
@@ -197,6 +250,9 @@ class bot_search_helper(object):
 
 		args = args[1:]
 		args.sort()
+
+		if len(repr(args)) > 128:
+			return msg.reply('Query option too long!')
 
 		search_check = self.check_duplicate_msg_history_search_request(args)
 		search_id = self.insert_msg_query_history(args) if search_check is None else search_check['_id']
@@ -228,19 +284,20 @@ class bot_search_helper(object):
 				), args)
 			return '{3}\n\nPage: {0} / {1}\nLast_query: <code>{2}</code>'.format(
 				(step // self.page_limit) + 1,
-				(max_count // self.page_limit) + 1,
+				# From: https://www.geeksforgeeks.org/g-fact-35-truncate-in-python/
+				math.ceil(max_count / self.page_limit),
 				time.strftime('%Y-%m-%d %H:%M:%S'),
 				'\n'.join(self.show_query_msg_result(x) for x in sqlObj)
 			), max_count
-		return 'Empty', 0
+		return '404 Not found', 0
 
 	def settings_to_sql_options(self):
 		args = []
 
-		if self.only_group:
-			args.append('`chat_id` < 0')
-		elif self.only_user:
+		if self.only_user:
 			args.append('`chat_id` > 0')
+		elif self.only_group:
+			args.append('`chat_id` < 0')
 
 		if self.except_forward:
 			args.append('`forward` = 0')
@@ -249,6 +306,7 @@ class bot_search_helper(object):
 				args.append('`chat_id` = {}'.format(self.specify_id))
 			else:
 				args.append('`from_user` = {}'.format(self.specify_id))
+
 		if len(args) == 0:
 			return '1 = 1'
 		else:
@@ -256,8 +314,8 @@ class bot_search_helper(object):
 
 	def show_query_msg_result(self, d: dict):
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-		if len(d['text']) > 800: # prevert message too long
-			d['text'] = d['text'][:880] + '...'
+		if len(d['text']) > 750: # prevert message too long
+			d['text'] = d['text'][:750] + '...'
 		d['forward_info'] = '<b>Forward From</b>: <code>{}</code>\n'.format(d['forward_from']) if d['forward_from'] else ''
 
 		return (
@@ -380,4 +438,10 @@ class bot_search_helper(object):
 			return s
 
 	def stop(self):
-		return self.bot.stop()
+		self.bot.stop()
+		if self._init:
+			self.conn.close()
+
+if __name__ == "__main__":
+	b = bot_search_helper()
+	b.bot.idle()
