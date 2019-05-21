@@ -90,13 +90,14 @@ class bot_search_helper(object):
 				try:
 					self.set_page_limit(msggroup[2])
 				except ValueError:
-					msg.reply('use `/set limit <value>` to set page limit')
+					return msg.reply('use `/set limit <value>` to set page limit', True)
 			elif msggroup[1] == 'id':
 				try:
 					self.specify_id = int(msggroup[2])
 				except ValueError:
-					msg.reply('use `/set id <value>` to set specify id')
+					return msg.reply('use `/set id <value>` to set specify id', True)
 			self.update_setting()
+			msg.reply(self.generate_settings(), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
 
 	def initialize_setting(self, init: bool = True):
 		sqlObj = self.conn.query1("SELECT * FROM `settings` WHERE `user_id` = %s", self.owner)
@@ -123,6 +124,7 @@ class bot_search_helper(object):
 				self.is_specify_id, self.is_specify_chat, self.specify_id, self.page_limit, self.owner
 			)]
 		)
+		self.conn.commit()
 
 	def set_page_limit(self, limit: int):
 		limit = int(limit)
@@ -134,16 +136,17 @@ class bot_search_helper(object):
 			self.page_limit = limit
 
 	def generate_settings(self):
-		return ('<b>Current user id:</b> <code>{owner}</code>\n' + \
-			'\n<b>Force Query:</b> <code>{force_query}</code>\n'+ \
-			'<b>Result each page:</b> <code>{page_limit}</code>\n'+ \
-			'<b>Only user:</b> <code>{only_user}</code>\n'+ \
-			'<b>Only group:</b> <code>{only_group}</code>\n'+ \
-			'<b>Except forward:</b> <code>{except_forward}</code>\n'+ \
-			'<b>Except bot:</b> <code>{except_bot}</code>\n'+ \
-			'<b>Use specify id:</b> <code>{is_specify_id}</code>\n'+ \
-			'<b>Specify id is chat:</b> <code>{is_specify_chat}</code>\n'+ \
-			'<b>Specify id:</b> <code>{specify_id}</code>\n\n' + \
+		return (
+			'<b>Current user id:</b> <code>{owner}</code>\n'
+			'\n<b>Force Query:</b> <code>{force_query}</code>\n'
+			'<b>Result each page:</b> <code>{page_limit}</code>\n'
+			'<b>Only user:</b> <code>{only_user}</code>\n'
+			'<b>Only group:</b> <code>{only_group}</code>\n'
+			'<b>Except forward:</b> <code>{except_forward}</code>\n'
+			'<b>Except bot:</b> <code>{except_bot}</code>\n'
+			'<b>Use specify id:</b> <code>{is_specify_id}</code>\n'
+			'<b>Specify id is chat:</b> <code>{is_specify_chat}</code>\n'
+			'<b>Specify id:</b> <code>{specify_id}</code>\n\n'
 			'<b>Last refresh:</b> ' + time.strftime('<code>%Y-%m-%d %H:%M:%S</code>')
 			).format(
 				**{x: getattr(self, x, None) for x in dir(self)}
@@ -152,15 +155,15 @@ class bot_search_helper(object):
 	def generate_settings_keyboard(self):
 		return InlineKeyboardMarkup( inline_keyboard = [
 			[
-				InlineKeyboardButton(text = 'user only', callback_data = b'set only user'),
-				InlineKeyboardButton(text = 'group only', callback_data = b'set only group')
+				InlineKeyboardButton(text = 'User only', callback_data = b'set only user'),
+				InlineKeyboardButton(text = 'Group only', callback_data = b'set only group')
 			],
 			[
-				InlineKeyboardButton(text = 'user specify id', callback_data = b'set specify toggle'),
+				InlineKeyboardButton(text = 'use specify id', callback_data = b'set specify toggle'),
 				InlineKeyboardButton(text = 'specify chat', callback_data = b'set specify chat')
 			],
-			[InlineKeyboardButton(text = 'refresh', callback_data = b'set refresh')],
-			[InlineKeyboardButton(text = 'reset', callback_data = b'set reset')]
+			[InlineKeyboardButton(text = 'Refresh', callback_data = b'set refresh')],
+			[InlineKeyboardButton(text = 'Reset', callback_data = b'set reset')]
 		])
 
 	def handle_search_user_history(self, client: Client, msg: Message):
@@ -280,6 +283,7 @@ class bot_search_helper(object):
 		datagroup = msg.data.split()
 
 		if datagroup[0] == 'msg':
+
 			if datagroup[1] in ('n', 'b', 'r'):
 				sqlObj = self.get_msg_search_history(datagroup[2])
 				args = eval(sqlObj['args'])
@@ -297,14 +301,17 @@ class bot_search_helper(object):
 			msg.answer()
 
 		elif datagroup[0] == 'set':
+
 			if datagroup[1] == 'reset':
 				self.conn.execute("DELETE FROM `settings` WHERE `user_id` = %s", (msg.from_user.id,))
 				self.initialize_setting(False)
 				self.refresh_settings(msg.message)
 				msg.answer('Settings has been reset!')
+
 			elif datagroup[1] == 'refresh':
 				self.refresh_settings(msg.message)
 				msg.answer()
+
 			elif datagroup[1] == 'only':
 				if datagroup[2] == 'user':
 					self.only_user = not self.only_user
@@ -335,7 +342,7 @@ class bot_search_helper(object):
 				InlineKeyboardButton(text = 'Re-search', callback_data = 'msg r {}'.format(search_id).encode()),
 			]
 		]
-		if current_index + self.page_limit > max_index:
+		if current_index + self.page_limit > max_index - 1:
 			kb[0].pop(1)
 		if current_index == 0:
 			kb[0].pop(0)
