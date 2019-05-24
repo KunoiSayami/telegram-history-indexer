@@ -30,6 +30,8 @@ import datetime
 import os
 import math
 import re
+import opencc
+import itertools
 
 class user(object):
 	def __init__(self, user_id: int, first_name: str, last_name: str or None = None, photo_id: str or None = None, **kwargs):
@@ -126,7 +128,7 @@ class bot_search_helper(object):
 	def handle_setting(self, client: Client, msg: Message):
 		msggroup = msg.text.split()
 		if len(msggroup) == 1:
-			msg.reply('Settings:\n{}'.format(self.generate_settings()), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
+			msg.reply(self.generate_settings(), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
 		elif len(msggroup) == 3:
 			if msggroup[1] == 'limit':
 				try:
@@ -273,10 +275,13 @@ class bot_search_helper(object):
 			return msg.reply('Please use `/sm <msg_text1> [<msg_text2> <msg_text3> ...]` to search database', True)
 
 		args = args[1:]
-		args.sort()
 
 		if len(repr(args)) > 128:
 			return msg.reply('Query option too long!')
+
+		cct2s = opencc.OpenCC('t2s')
+		args = list(set([cct2s.convert(x) for x in args]))
+		args.sort()
 
 		search_check = self.check_duplicate_msg_history_search_request(args)
 		if search_check is None:
@@ -289,10 +294,17 @@ class bot_search_helper(object):
 		else:
 			msg.reply(text, True)
 
+	def generate_args(self, args: list):
+		ccs2t = opencc.OpenCC('s2t')
+		if isinstance(args, tuple):
+			args = list(args)
+		tmp = list(tuple(set(items)) for items in map(lambda x : (f'%{x}%', f'%{ccs2t.convert(x)}%'), args))
+		SqlStr = ' AND '.join(['({})'.format(' OR '.join('`text` LIKE %s' for y in x)) for x in tmp])
+		return list(itertools.chain.from_iterable(tmp)), SqlStr
+
 	def query_message_history(self, args: list, step: int = 0, timestamp: str or "datetime.datetime" = '', *, callback: "callable" = None):
 		'''need passing origin args to this function'''
-		args = ['%{}%'.format(x) for x in args]
-		sqlStr = ' AND '.join('`text` LIKE %s' for x in args)
+		args, sqlStr = self.generate_args(args)
 
 		if timestamp != '':
 			timestamp = f' AND `timestamp` < \'{timestamp}\''
@@ -322,7 +334,7 @@ class bot_search_helper(object):
 	def handle_select_message(self, client: Client, msg: Message):
 		if msg.reply_to_message is None:
 			return msg.reply('Please reply a search result message (except 404 message)', True)
-		if msg.reply_to_message.reply_markup.inline_keyboard[-1][0].text != 'Re-search':
+		if msg.reply_to_message.reply_markup is None or msg.reply_to_message.reply_markup.inline_keyboard[-1][0].text != 'Re-search':
 			return msg.reply('Inline keyboard not found!', True)
 		sqlObj = self.get_msg_search_history(msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.decode().split()[-1])
 		if sqlObj is None:
@@ -424,7 +436,7 @@ class bot_search_helper(object):
 
 			elif datagroup[1] == 'force':
 				self.force_query = not self.force_query
-			
+
 			elif datagroup[1] == 'id':
 				self.is_specify_id = False
 				self.is_specify_id = False

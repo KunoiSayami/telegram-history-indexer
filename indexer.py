@@ -20,7 +20,7 @@
 from libpy3.mysqldb import mysqldb
 import json
 from configparser import ConfigParser
-from pyrogram import Client, Message, User, MessageHandler, Chat, Filters, api, Dialog, Dialogs
+from pyrogram import Client, Message, User, MessageHandler, Chat, Filters, api
 import hashlib
 import warnings
 import traceback
@@ -153,6 +153,7 @@ class history_index_class(object):
 	def _insert_msg(self, msg: Message):
 		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/MagicForward'):
 			args = msg.text.split()
+			self.client.send(api.functions.messages.ReadHistory(self.client.resolve_peer(msg.chat.id), max_id = msg.message_id))
 			msg.delete()
 			try:
 				self.client.forward_messages('self', int(args[1]), int(args[2]), True)
