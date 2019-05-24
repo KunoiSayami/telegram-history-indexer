@@ -27,6 +27,7 @@ import traceback
 import threading
 import datetime
 from index_bothelper import bot_search_helper
+import time
 from spider import iter_user_messages
 
 class user_profile(object):
@@ -58,7 +59,7 @@ class user_profile(object):
 
 		if isinstance(user, User):
 			self.sql_insert = (
-				"INSERT INTO `user_history` (`user_id`, `first_name`, `last_name`, `photo_id`, `hash`) VALUES (%s, %s, %s, %s, %s)",
+				"INSERT INTO `user_history` (`user_id`, `first_name`, `last_name`, `photo_id`, `hash`) VALUE (%s, %s, %s, %s, %s)",
 				(
 					self.user_id,
 					#self.username,
@@ -70,7 +71,7 @@ class user_profile(object):
 			)
 		else:
 			self.sql_insert = (
-				"INSERT INTO `user_history` (`user_id`, `first_name` , `photo_id`, `hash`) VALUES (%s, %s, %s, %s)",
+				"INSERT INTO `user_history` (`user_id`, `first_name` , `photo_id`, `hash`) VALUE (%s, %s, %s, %s)",
 				(
 					self.user_id,
 					#self.username,
@@ -81,7 +82,7 @@ class user_profile(object):
 			)
 
 class history_index_class(object):
-	def __init__(self, client: Client = None, conn: mysqldb = None, bot_instance: list or tuple = (None, 0)):
+	def __init__(self, client: Client = None, conn: mysqldb = None):
 		self._lock_user = threading.Lock()
 		self._lock_msg = threading.Lock()
 		if client is None:
@@ -94,6 +95,8 @@ class history_index_class(object):
 			)
 		else:
 			self.client = client
+
+		self.bot_id = 0
 
 		if conn is None:
 			try:
@@ -108,22 +111,17 @@ class history_index_class(object):
 				config['mysql']['passwd'],
 				config['mysql']['history_db'],
 			)
+			self.bot_id = int(config['account']['indexbot_token'].split(':')[0])
 			self.conn.do_keepalive()
-			self._init = False
+			self._init = True
 		else:
 			self.conn = conn
-			self._init = True
-
-		self.init_bot(*bot_instance)
+			self._init = False
 
 		self.client.add_handler(MessageHandler(self.handle_all_message))
-		
+
 		self.index_dialog = iter_user_messages(self)
 
-
-	def init_bot(self, bot_instance: str or Client, owner: int):
-		if bot_instance is None: return
-		self.bot = bot_search_helper(self.conn, bot_instance, owner)
 
 	def handle_all_message(self, _: Client, msg: Message):
 		threading.Thread(target = self._thread, args = (msg,), daemon = True).start()
@@ -138,8 +136,8 @@ class history_index_class(object):
 
 	def insert_msg(self, msg: Message):
 		with self._lock_msg:
-			self._insert_msg(msg)
-			self.conn.commit()
+			if self._insert_msg(msg):
+				self.conn.commit()
 
 	@staticmethod
 	def get_msg_type(msg: Message):
@@ -153,6 +151,16 @@ class history_index_class(object):
 			return getattr(msg, _type).file_id
 
 	def _insert_msg(self, msg: Message):
+		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/MagicForward'):
+			args = msg.text.split()
+			msg.delete()
+			try:
+				self.client.forward_messages('self', int(args[1]), int(args[2]), True)
+			except:
+				self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
+
+		if (msg.from_user and msg.chat.id == msg.from_user.id and msg.from_user.is_self): return
+
 		text = msg.text if msg.text else msg.caption if msg.caption else ''
 
 		if text.startswith('/') and not text.startswith('//'):
@@ -167,42 +175,41 @@ class history_index_class(object):
 		sqlObj = self.conn.query1("SELECT `_id` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
 				'document_' if msg_type != 'text' else ''
 			), (msg.chat.id, msg.message_id))
-
 		if sqlObj is not None:
 			self.conn.execute("UPDATE `{}index` SET `text` = %s WHERE `_id` = %s".format(
 					'document_' if msg_type != 'text' else ''
 				), (text, sqlObj['_id']))
 			return
 
-		if msg_type == 'text':
-			self.conn.execute(
-				"INSERT INTO `index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUES (%s, %s, %s, %s, %s, %s)",
-				(
-					#h,
-					msg.chat.id,
-					msg.message_id,
-					msg.from_user.id if msg.from_user else msg.chat.id,
-					msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else 0,
-					text,
-					datetime.datetime.fromtimestamp(msg.date).strftime('%Y-%m-%d %H:%M:%S')
-					#repr(json.loads(str(msg)))
-				)
+		self.conn.execute(
+			"INSERT INTO `index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUE (%s, %s, %s, %s, %s, %s)",
+			(
+				#h,
+				msg.chat.id,
+				msg.message_id,
+				msg.from_user.id if msg.from_user else msg.chat.id,
+				msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
+				text,
+				datetime.datetime.fromtimestamp(msg.date).strftime('%Y-%m-%d %H:%M:%S')
+				#repr(json.loads(str(msg)))
 			)
-		else:
+		)
+		if msg_type != 'text':
 			self.conn.execute(
 				"INSERT INTO `document_index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`, `type`, `file_id`) " + \
-					"VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+					"VALUE (%s, %s, %s, %s, %s, %s, %s, %s)",
 				(
 					msg.chat.id,
 					msg.message_id,
 					msg.from_user.id if msg.from_user else msg.chat.id,
-					msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else 0,
+					msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
 					text if len(text) > 0 else None,
 					datetime.datetime.fromtimestamp(msg.date).strftime('%Y-%m-%d %H:%M:%S'),
 					msg_type,
 					self.get_file_id(msg, msg_type)
 				)
 			)
+		return True
 
 
 	def _user_profile_track(self, msg: Message):

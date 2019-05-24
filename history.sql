@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS `document_index` (
   `_id` int(11) NOT NULL AUTO_INCREMENT,
   `chat_id` bigint(20) NOT NULL,
   `from_user` bigint(20) NOT NULL,
-  `forward_from` bigint(20) NOT NULL DEFAULT '0',
+  `forward_from` bigint(20) DEFAULT NULL,
   `message_id` int(11) unsigned NOT NULL,
   `text` text COLLATE utf8mb4_unicode_ci,
   `type` enum('document','photo','video','animation') CHARACTER SET utf8 COLLATE utf8_unicode_ci NOT NULL,

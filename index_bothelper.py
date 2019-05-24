@@ -297,7 +297,6 @@ class bot_search_helper(object):
 		if timestamp != '':
 			timestamp = f' AND `timestamp` < \'{timestamp}\''
 
-		print(args, sqlStr, step, timestamp)
 		max_count = self.conn.query1(f"SELECT COUNT(*) AS `count` FROM `index` WHERE {sqlStr} AND {self.settings_to_sql_options()} {timestamp}", args)['count']
 		if max_count:
 			sqlObj = self.conn.query(f"SELECT * FROM `index` WHERE {sqlStr} AND {self.settings_to_sql_options()} {timestamp} ORDER BY `timestamp` DESC LIMIT {step}, {self.page_limit}".format(
@@ -438,7 +437,7 @@ class bot_search_helper(object):
 				sqlObj = self.conn.query1("SELECT * FROM `index` WHERE `_id` = %s", datagroup[2])
 				msg.message.edit(self.generate_detail_msg(sqlObj), 'html', reply_markup = self.generate_detail_keyboard(sqlObj))
 			elif datagroup[1] == 'fwd':
-				client.forward_messages(msg.message.chat.id, int(datagroup[2]), (int(datagroup[3]),))
+				msg.message.reply(f'/MagicForward {datagroup[2]} {datagroup[3]}')
 			elif datagroup[1] == 'get':
 				self._handle_accurate_search_user(client, msg.message, datagroup[1:])
 
@@ -450,7 +449,7 @@ class bot_search_helper(object):
 		if sqlObj['chat_id'] != sqlObj['from_user']:
 			chatObj = self.conn.query1("SELECT * FROM `user_history` WHERE `user_id` = %s", (sqlObj['chat_id'],))
 			r += f'\n\nChat:\n{self.generate_user_info(chatObj)}'
-		return f'Message Details:\nFrom User:{r}\n\n{self.show_query_msg_result(sqlObj)}'
+		return f'Message Details:\nFrom User:\n{r}\n\n{self.show_query_msg_result(sqlObj)}'
 
 	def generate_detail_keyboard(self, sqlObj: dict):
 		return InlineKeyboardMarkup( inline_keyboard = [
@@ -488,7 +487,6 @@ class bot_search_helper(object):
 	def insert_msg_query_history(self, args: list):
 		with self.query_lock:
 			self.conn.execute("INSERT INTO `search_history` (`args`, `hash`) VALUE (%s, %s)", (repr(args), self.get_msg_query_hash(args)))
-			self.conn.commit()
 			return self.conn.query1("SELECT `_id`, `timestamp` FROM `search_history` ORDER BY `_id` DESC LIMIT 1")
 
 	def check_duplicate_msg_history_search_request(self, args: list):
