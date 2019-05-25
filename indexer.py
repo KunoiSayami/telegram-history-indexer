@@ -25,7 +25,6 @@ import warnings
 import traceback
 import threading
 import datetime
-import time
 from spider import iter_user_messages
 
 class simple_user_profile(object):
@@ -186,14 +185,15 @@ class history_index_class(object):
 			else:
 				msg_type = 'text'
 
-		sqlObj = self.conn.query1("SELECT `_id` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
-				'document_' if msg_type != 'text' else ''
-			), (msg.chat.id, msg.message_id))
-		if sqlObj is not None:
-			self.conn.execute("UPDATE `{}index` SET `text` = %s WHERE `_id` = %s".format(
+		if msg.edit_date:
+			sqlObj = self.conn.query1("SELECT `_id` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
 					'document_' if msg_type != 'text' else ''
-				), (text, sqlObj['_id']))
-			return
+				), (msg.chat.id, msg.message_id))
+			if sqlObj is not None:
+				self.conn.execute("UPDATE `{}index` SET `text` = %s WHERE `_id` = %s".format(
+						'document_' if msg_type != 'text' else ''
+					), (text, sqlObj['_id']))
+				return
 
 		self.conn.execute(
 			"INSERT INTO `index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUE (%s, %s, %s, %s, %s, %s)",
@@ -246,7 +246,8 @@ class history_index_class(object):
 			self._real_user_index(x)
 		self.conn.commit()
 
-	def _real_user_index(self, user: User or Chat):
+	def _real_user_index(self, user: User or Chat, disable_get: bool = False):
+		self.insert_username(user)
 		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user.id)
 		profileObj = user_profile(user)
 		if sqlObj is None:
@@ -279,16 +280,13 @@ class history_index_class(object):
 			)
 			self.conn.execute(*profileObj.sql_insert)
 
-		elif (datetime.datetime.now() - sqlObj['timestamp']).total_seconds() > 3600:
+		elif not disable_get and (datetime.datetime.now() - sqlObj['last_refresh']).total_seconds() > 3600:
 			if isinstance(user, User):
-				u = self.client.get_users([user.id,])
+				u = self.client.get_users([user.id,])[0]
 			else:
-				u = self.client.get_chat([user.id,])
-			self.conn.execute('UPDATE `user_index` SET `last_refresh` = CURRENT_TIMESTAMP()')
-			self.conn.commit()
-			return self.real_user_index(u)
-		self.insert_username(user)
-
+				u = self.client.get_chat(user.id)
+			self.conn.execute('UPDATE `user_index` SET `last_refresh` = CURRENT_TIMESTAMP() WHERE `user_id` = %s', user.id)
+			return self._real_user_index(u, True)
 
 	def close(self):
 		if self._init:
