@@ -4,14 +4,6 @@
 /*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
 
--- Dumping structure for table bot_track
-DROP TABLE IF EXISTS `bot_track`;
-CREATE TABLE IF NOT EXISTS `bot_track` (
-  `user_id` int(11) NOT NULL,
-  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`user_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 -- Dumping structure for table document_index
 DROP TABLE IF EXISTS `document_index`;
 CREATE TABLE IF NOT EXISTS `document_index` (
@@ -50,6 +42,14 @@ CREATE TABLE IF NOT EXISTS `indexed_dialogs` (
   PRIMARY KEY (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 
+-- Dumping structure for table media_cache
+DROP TABLE IF EXISTS `media_cache`;
+CREATE TABLE IF NOT EXISTS `media_cache` (
+  `avatar_id` varchar(64) COLLATE utf8_unicode_ci NOT NULL,
+  `file_id` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  PRIMARY KEY (`avatar_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
 -- Dumping structure for table search_history
 DROP TABLE IF EXISTS `search_history`;
 CREATE TABLE IF NOT EXISTS `search_history` (
@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS `settings` (
   `force_query` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
   `only_user` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
   `only_group` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `show_info_detail` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
   `except_forward` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
   `except_bot` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
   `is_specify_id` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
@@ -95,9 +96,23 @@ CREATE TABLE IF NOT EXISTS `user_history` (
   `last_name` varchar(256) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `photo_id` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'big_file_id',
   `last_update` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `hash` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
   PRIMARY KEY (`_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Dumping structure for table user_index
+DROP TABLE IF EXISTS `user_index`;
+CREATE TABLE IF NOT EXISTS `user_index` (
+  `user_id` bigint(20) NOT NULL,
+  `last_refresh` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Record getuser',
+  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `first_name` varchar(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `last_name` varchar(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `is_group` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `is_bot` enum('Y','N') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `photo_id` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `hash` varchar(64) COLLATE utf8_unicode_ci NOT NULL,
+  PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 
 /*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;
 /*!40014 SET FOREIGN_KEY_CHECKS=IF(@OLD_FOREIGN_KEY_CHECKS IS NULL, 1, @OLD_FOREIGN_KEY_CHECKS) */;

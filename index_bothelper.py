@@ -26,7 +26,6 @@ import hashlib
 import warnings
 import threading
 import time
-import datetime
 import os
 import math
 import re
@@ -34,7 +33,7 @@ import opencc
 import itertools
 
 class user(object):
-	def __init__(self, user_id: int, first_name: str, last_name: str or None = None, photo_id: str or None = None, **kwargs):
+	def __init__(self, user_id: int, first_name: str, last_name: str or None = None, photo_id: str or None = None, **_kwargs):
 		self.user_id = user_id
 		self.first_name = first_name
 		self.last_name = last_name
@@ -50,7 +49,7 @@ class user(object):
 class bot_search_helper(object):
 	STEP = re.compile(r'Page: (\d+) / \d+')
 
-	def __preinit(self):
+	def __init__(self, conn: mysqldb = None, bot_instance: Client or str = '', owner_id: int = 0):
 		self.force_query = None
 		self.only_user = None
 		self.only_group = None
@@ -61,9 +60,6 @@ class bot_search_helper(object):
 		self.specify_id = 0
 		self.page_limit = 0
 		self.show_info_detail = None
-
-	def __init__(self, conn: mysqldb = None, bot_instance: Client or str = '', owner_id: int = 0):
-		self.__preinit()
 
 		self.owner = owner_id
 		if isinstance(bot_instance, Client):
@@ -127,7 +123,7 @@ class bot_search_helper(object):
 		else:
 			msg.reply('Oops! Something wrong!', True)
 
-	def handle_setting(self, client: Client, msg: Message):
+	def handle_setting(self, _client: Client, msg: Message):
 		msggroup = msg.text.split()
 		if len(msggroup) == 1:
 			msg.reply(self.generate_settings(), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
@@ -227,20 +223,20 @@ class bot_search_helper(object):
 			]
 		])
 
-	def handle_search_user_history(self, client: Client, msg: Message):
+	def handle_search_user_history(self, _client: Client, msg: Message):
 		args = msg.text.split()
 		if len(args) != 2:
 			return msg.reply('Please use `/su <username>` to search database', True)
 		args[1] = '%{}%'.format(args[1])
-		sqlObj = self.conn.query("SELECT * FROM `user_history` WHERE `first_name` LIKE %s OR `last_name` LIKE %s", (args[1], args[1]))
+		sqlObj = self.conn.query("SELECT * FROM `user_index` WHERE `first_name` LIKE %s OR `last_name` LIKE %s", (args[1], args[1]))
 		if len(sqlObj) == 0:
 			return msg.reply('Sorry, We can\'t found this user.', True)
 		msg.reply('<b>User id</b>: <b>Full name</b>\n' + self.generate_user_list(sqlObj), parse_mode = 'html')
 
 	def generate_user_list(self, sqlObjx: tuple):
 		return '\n'.join('<code>{user_id}</code>: <pre>{full_name}</pre>'.format(
-			**sqlObj.get_dict()
-		) for sqlObj in list(set(user(**x) for x in sqlObjx)))
+			**user(**sqlObj).get_dict()
+		) for sqlObj in sqlObjx)
 
 	def send_photo(self, client: Client, msg: Message, sqlObj: dict):
 		with self.search_lock:
@@ -263,7 +259,7 @@ class bot_search_helper(object):
 		self._handle_accurate_search_user(client, msg, args)
 
 	def _handle_accurate_search_user(self, client: Client, msg: Message, args: list):
-		sqlObj = self.conn.query1("SELECT * FROM `user_history` WHERE `user_id` = %s", args[1:])
+		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", args[1:])
 		if sqlObj is None:
 			return msg.reply('Sorry, We can\'t found this user.', True)
 		if sqlObj['photo_id']:
@@ -276,10 +272,10 @@ class bot_search_helper(object):
 			'<b>User id</b>: <code>{user_id}</code>\n' + \
 			'<b>First name</b>: <code>{first_name}</code>\n' + \
 			('<b>Last name</b>: <code>{last_name}</code>\n' if user_sqlObj['last_name'] else '') + \
-			'<b>Last update</b>: <code>{last_update}</code>\n'
+			'<b>Last update</b>: <code>{timestamp}</code>\n'
 		).format(**user_sqlObj)
 
-	def handle_search_message_history(self, client: Client, msg: Message):
+	def handle_search_message_history(self, _client: Client, msg: Message):
 		args = msg.text.split()
 		if len(args) == 1:
 			return msg.reply('Please use `/sm <msg_text1> [<msg_text2> <msg_text3> ...]` to search database', True)
@@ -341,7 +337,7 @@ class bot_search_helper(object):
 			] for x in sqlObj
 		])
 
-	def handle_select_message(self, client: Client, msg: Message):
+	def handle_select_message(self, _client: Client, msg: Message):
 		if msg.reply_to_message is None:
 			return msg.reply('Please reply a search result message (except 404 message)', True)
 		if msg.reply_to_message.reply_markup is None or msg.reply_to_message.reply_markup.inline_keyboard[-1][0].text != 'Re-search':
@@ -535,7 +531,7 @@ class bot_search_helper(object):
 		else:
 			return s
 
-	def handle_disconnect(self, client: Client):
+	def handle_disconnect(self, _client: Client):
 		if self._init:
 			self.conn.close()
 

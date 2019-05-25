@@ -18,31 +18,41 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from libpy3.mysqldb import mysqldb
-import json
 from configparser import ConfigParser
-from pyrogram import Client, Message, User, MessageHandler, Chat, Filters, api, DisconnectHandler
+from pyrogram import Client, Message, User, MessageHandler, Chat, api, DisconnectHandler
 import hashlib
 import warnings
 import traceback
 import threading
 import datetime
-from index_bothelper import bot_search_helper
 import time
 from spider import iter_user_messages
 
-class user_profile(object):
+class simple_user_profile(object):
 	def __init__(self, user: User or Chat or None):
-		self.user_id = user.id
+		self.raw = user
+		self.user_id = user.id if user != None else None
+	def __hash__(self):
+		return hash(self.user_id)
+	def __eq__(self, sup):
+		return self.user_id == sup.user_id
+
+class user_profile(simple_user_profile):
+	def __init__(self, user: User or Chat or None):
+		simple_user_profile.__init__(self, user)
+		if user is None: return
+
 		#self.username = user.username if user.username else None
 		self.photo_id = user.photo.big_file_id if user.photo else None
 
-		if isinstance(user, Chat) and user.type != 'private':
-			self.full_name = user.title
+		if isinstance(user, Chat) and user.type not in ('private', 'bot'):
+			self.first_name = self.full_name = user.title
+			self.last_name = None
 		else:
 			self.first_name = user.first_name
 			self.last_name = user.last_name if user.last_name else None
 			self.full_name = '{} {}'.format(self.first_name, self.last_name) if self.last_name else self.first_name
-
+		
 		if self.full_name is None:
 			warnings.warn(
 				'Caughted None first name',
@@ -58,25 +68,23 @@ class user_profile(object):
 
 		if isinstance(user, User):
 			self.sql_insert = (
-				"INSERT INTO `user_history` (`user_id`, `first_name`, `last_name`, `photo_id`, `hash`) VALUE (%s, %s, %s, %s, %s)",
+				"INSERT INTO `user_history` (`user_id`, `first_name`, `last_name`, `photo_id`) VALUE (%s, %s, %s, %s)",
 				(
 					self.user_id,
 					#self.username,
 					self.first_name,
 					self.last_name,
 					self.photo_id,
-					self.hash
 				)
 			)
 		else:
 			self.sql_insert = (
-				"INSERT INTO `user_history` (`user_id`, `first_name` , `photo_id`, `hash`) VALUE (%s, %s, %s, %s)",
+				"INSERT INTO `user_history` (`user_id`, `first_name` , `photo_id`) VALUE (%s, %s, %s)",
 				(
 					self.user_id,
 					#self.username,
 					self.full_name,
 					self.photo_id,
-					self.hash
 				)
 			)
 
@@ -190,14 +198,12 @@ class history_index_class(object):
 		self.conn.execute(
 			"INSERT INTO `index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUE (%s, %s, %s, %s, %s, %s)",
 			(
-				#h,
 				msg.chat.id,
 				msg.message_id,
 				msg.from_user.id if msg.from_user else msg.chat.id,
 				msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
 				text,
 				datetime.datetime.fromtimestamp(msg.date)
-				#repr(json.loads(str(msg)))
 			)
 		)
 		if msg_type != 'text':
@@ -218,29 +224,13 @@ class history_index_class(object):
 		return True
 
 	def _user_profile_track(self, msg: Message):
-		if not msg.outgoing and msg.chat.type not in ('private', 'bot') and msg.from_user:
-			self.insert_user_profile(msg.from_user)
-		if msg.forward_from:
-			self.insert_user_profile(msg.forward_from)
-		if msg.forward_from_chat:
-			self.insert_user_profile(msg.forward_from_chat)
-		self.insert_user_profile(msg.chat)
+		users = [x.raw for x in list(set(user_profile(x) for x in [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat]))]
+		users.remove(None)
+		self.real_user_index(users)
 
 	def user_profile_track(self, msg: Message):
 		with self._lock_user:
 			self._user_profile_track(msg)
-
-	def insert_user_profile(self, user: User):
-		try:
-			u = user_profile(user)
-			sqlObj = self.conn.query1("SELECT `hash` FROM `user_history` WHERE `user_id` = %s ORDER BY `_id` DESC LIMIT 1", (user.id,))
-			if sqlObj is None or u.hash != sqlObj['hash']:
-				self.conn.execute(*u.sql_insert)
-				self.conn.commit()
-			self.insert_username(user)
-		except:
-			traceback.print_exc()
-			print(user)
 
 	def insert_username(self, user: User or Chat):
 		if user.username is None:
@@ -251,9 +241,59 @@ class history_index_class(object):
 		self.conn.execute("INSERT INTO `username_history` (`user_id`, `username`) VALUE (%s, %s)", (user.id, user.username))
 		self.conn.commit()
 
-	def close(self):
-		pass
+	def real_user_index(self, users: list):
+		for x in users:
+			self._real_user_index(x)
+		self.conn.commit()
 
-	def handle_disconnect(self, client: Client):
+	def _real_user_index(self, user: User or Chat):
+		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user.id)
+		profileObj = user_profile(user)
+		if sqlObj is None:
+			is_bot = isinstance(user, User) and user.is_bot
+			is_group = user.id < 0
+			self.conn.execute(
+				"INSERT INTO `user_index` (`user_id`, `first_name`, `last_name`, `photo_id`, `hash`, `is_bot`, `is_group`) VALUE (%s, %s, %s, %s, %s, %s, %s)",
+				(
+					profileObj.user_id,
+					profileObj.first_name,
+					profileObj.last_name,
+					profileObj.photo_id,
+					profileObj.hash,
+					'Y' if is_bot else 'N',
+					'Y' if is_group else 'N'
+				)
+			)
+			self.conn.execute(*profileObj.sql_insert)
+
+		elif profileObj.hash != sqlObj['hash']:
+			self.conn.execute(
+				"UPDATE `user_index` SET `first_name` = %s, `last_name` = %s, `photo_id` = %s, `hash` = %s, `timestamp` = CURRENT_TIMESTAMP() WHERE `user_id` = %s",
+				(
+					profileObj.first_name,
+					profileObj.last_name,
+					profileObj.photo_id,
+					profileObj.hash,
+					profileObj.user_id,
+				)
+			)
+			self.conn.execute(*profileObj.sql_insert)
+
+		elif (datetime.datetime.now() - sqlObj['timestamp']).total_seconds() > 3600:
+			if isinstance(user, User):
+				u = self.client.get_users([user.id,])
+			else:
+				u = self.client.get_chat([user.id,])
+			self.conn.execute('UPDATE `user_index` SET `last_refresh` = CURRENT_TIMESTAMP()')
+			self.conn.commit()
+			return self.real_user_index(u)
+		self.insert_username(user)
+
+
+	def close(self):
+		if self._init:
+			self.conn.close()
+	
+	def handle_disconnect(self, _client: Client):
 		if self._init:
 			self.conn.close()

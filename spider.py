@@ -17,15 +17,14 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
-from pyrogram import Dialog, Dialogs, api
-from indexer import history_index_class
+from pyrogram import Dialogs, api
 import threading
 import traceback
 import time
 import warnings
 
 class iter_user_messages(threading.Thread):
-	def __init__(self, indexer: history_index_class):
+	def __init__(self, indexer):
 		threading.Thread.__init__(self, daemon = True)
 		self.client = indexer.client
 		self.conn = indexer.conn
@@ -38,8 +37,7 @@ class iter_user_messages(threading.Thread):
 	def _indenify_user(self, users: list):
 		userinfos = self.client.get_users(users)
 		for x in userinfos:
-			if x.is_bot:
-				self.conn.execute("INSERT INTO `bot_track` (`user_id`) VALUE (%s)", (x.id,))
+			self.indexer._real_user_index(x)
 		self.conn.commit()
 
 	def indenify_user(self):
@@ -100,33 +98,36 @@ class iter_user_messages(threading.Thread):
 		while True:
 			sqlObj = self.conn.query1("SELECT * FROM `indexed_dialogs` WHERE `indexed` = 'N' AND `user_id` > 1 LIMIT 1")
 			if sqlObj is None: break
-			if self.conn.query1("SELECT * FROM `bot_track` WHERE `user_id` = %s", (sqlObj['user_id'],)):
+			if self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s AND `is_bot` = 'Y'", (sqlObj['user_id'],)):
 				self.conn.execute("UPDATE `indexed_dialogs` SET `indexed` = 'Y' WHERE `user_id` = %s", (sqlObj['user_id'],))
 				continue
-			offset_id = sqlObj['last_message_id']
 			self.conn.execute("UPDATE `indexed_dialogs` SET `started_indexed` = 'Y' WHERE `user_id` = %s", (sqlObj['user_id'],))
 			self.conn.commit()
-			while offset_id > 1:
-				while True:
-					try:
-						msg_his = self.client.get_history(sqlObj['user_id'], offset_id = offset_id)
-						break
-					except api.errors.FloodWait as e:
-						warnings.warn(
-							'got FloodWait, wait {} seconds'.format(e.x),
-							RuntimeWarning
-						)
-						time.sleep(e.x)
-				self._process_messages(msg_his.messages)
-				try:
-					offset_id = msg_his.messages[-1].message_id - 1
-				except IndexError:
-					break
-				time.sleep(3)
+			self._process_messages(sqlObj['user_id'], sqlObj['last_message_id'])
 			self.conn.execute("UPDATE `indexed_dialogs` SET `indexed` = 'Y' WHERE `user_id` = %s", (sqlObj['user_id'],))
 			self.conn.commit()
 
-	def _process_messages(self, msg_group: list):
+	def _process_messages(self, user_id: int, offset_id: int):
+		while offset_id > 1:
+			print(offset_id)
+			while True:
+				try:
+					msg_his = self.client.get_history(user_id, offset_id = offset_id)
+					break
+				except api.errors.FloodWait as e:
+					warnings.warn(
+						'got FloodWait, wait {} seconds'.format(e.x),
+						RuntimeWarning
+					)
+					time.sleep(e.x)
+			self.__process_messages(msg_his.messages)
+			try:
+				offset_id = msg_his.messages[-1].message_id - 1
+			except IndexError:
+				break
+			time.sleep(3)
+
+	def __process_messages(self, msg_group: list):
 		with self.indexer._lock_msg:
 			for x in msg_group:
 				self.indexer._insert_msg(x)
