@@ -20,7 +20,7 @@
 from libpy3.mysqldb import mysqldb
 import json
 from configparser import ConfigParser
-from pyrogram import Client, Message, User, MessageHandler, Chat, Filters, api
+from pyrogram import Client, Message, User, MessageHandler, Chat, Filters, api, DisconnectHandler
 import hashlib
 import warnings
 import traceback
@@ -52,7 +52,6 @@ class user_profile(object):
 
 		self.hash = hashlib.sha256(','.join((
 			str(self.user_id),
-			#self.username if self.username else '',
 			self.full_name,
 			self.photo_id if self.photo_id else ''
 		)).encode()).hexdigest()
@@ -118,7 +117,8 @@ class history_index_class(object):
 			self.conn = conn
 			self._init = False
 
-		self.client.add_handler(MessageHandler(self.handle_all_message))
+		self.client.add_handler(MessageHandler(self.handle_all_message), 999)
+		self.client.add_handler(DisconnectHandler(self.handle_disconnect), 999)
 
 		self.index_dialog = iter_user_messages(self)
 
@@ -141,7 +141,12 @@ class history_index_class(object):
 
 	@staticmethod
 	def get_msg_type(msg: Message):
-		return 'photo' if msg.photo else 'video' if msg.video else 'animation' if msg.animation else 'document' if msg.document else 'text' if msg.text else 'error'
+		return 'photo' if msg.photo else \
+			'video' if msg.video else \
+			'animation' if msg.animation else \
+			'document' if msg.document else \
+			'text' if msg.text else \
+			'voice' if msg.voice else'error'
 
 	@staticmethod
 	def get_file_id(msg: Message, _type: str):
@@ -191,13 +196,13 @@ class history_index_class(object):
 				msg.from_user.id if msg.from_user else msg.chat.id,
 				msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
 				text,
-				datetime.datetime.fromtimestamp(msg.date).strftime('%Y-%m-%d %H:%M:%S')
+				datetime.datetime.fromtimestamp(msg.date)
 				#repr(json.loads(str(msg)))
 			)
 		)
 		if msg_type != 'text':
 			self.conn.execute(
-				"INSERT INTO `document_index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`, `type`, `file_id`) " + \
+				"INSERT INTO `document_index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`, `type`, `file_id`) "
 					"VALUE (%s, %s, %s, %s, %s, %s, %s, %s)",
 				(
 					msg.chat.id,
@@ -205,16 +210,15 @@ class history_index_class(object):
 					msg.from_user.id if msg.from_user else msg.chat.id,
 					msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
 					text if len(text) > 0 else None,
-					datetime.datetime.fromtimestamp(msg.date).strftime('%Y-%m-%d %H:%M:%S'),
+					datetime.datetime.fromtimestamp(msg.date),
 					msg_type,
 					self.get_file_id(msg, msg_type)
 				)
 			)
 		return True
 
-
 	def _user_profile_track(self, msg: Message):
-		if not msg.outgoing and msg.chat.type != 'private' and msg.from_user:
+		if not msg.outgoing and msg.chat.type not in ('private', 'bot') and msg.from_user:
 			self.insert_user_profile(msg.from_user)
 		if msg.forward_from:
 			self.insert_user_profile(msg.forward_from)
@@ -245,7 +249,11 @@ class history_index_class(object):
 		if sqlObj and sqlObj['username'] == user.username:
 			return
 		self.conn.execute("INSERT INTO `username_history` (`user_id`, `username`) VALUE (%s, %s)", (user.id, user.username))
+		self.conn.commit()
 
 	def close(self):
+		pass
+
+	def handle_disconnect(self, client: Client):
 		if self._init:
 			self.conn.close()

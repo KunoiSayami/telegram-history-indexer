@@ -20,7 +20,7 @@
 from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
 from pyrogram import Client, Message, MessageHandler, Filters, CallbackQueryHandler, CallbackQuery,\
-	InlineKeyboardMarkup, InlineKeyboardButton
+	InlineKeyboardMarkup, InlineKeyboardButton, DisconnectHandler
 import pyrogram
 import hashlib
 import warnings
@@ -108,6 +108,7 @@ class bot_search_helper(object):
 		self.query_lock = threading.Lock()
 		self.search_lock = threading.Lock()
 
+		self.bot.add_handler(MessageHandler(self.handle_forward, Filters.private & Filters.user(self.owner) & Filters.forwarded), -1)
 		self.bot.add_handler(MessageHandler(self.handle_search_user_history, Filters.private & Filters.user(self.owner) & Filters.command('su')))
 		self.bot.add_handler(MessageHandler(self.handle_search_message_history, Filters.private & Filters.user(self.owner) & Filters.command('sm')))
 		self.bot.add_handler(MessageHandler(self.handle_accurate_search_user, Filters.private & Filters.user(self.owner) & Filters.command('ua')))
@@ -115,6 +116,7 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_close_keyboard, Filters.private & Filters.user(self.owner) & Filters.command('close')))
 		self.bot.add_handler(MessageHandler(self.handle_select_message, Filters.private & Filters.user(self.owner) & Filters.command('select')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
+		self.bot.add_handler(DisconnectHandler(self.handle_disconnect))
 
 		self.initialize_setting()
 		self.bot.start()
@@ -181,6 +183,13 @@ class bot_search_helper(object):
 		else:
 			self.page_limit = limit
 
+	def handle_forward(self, client: Client, msg: Message):
+		if msg.text and msg.text.startswith('/'):
+			return
+		chat_id = msg.chat.id
+		msg.chat = msg.from_user = msg.entities = msg.caption_entities = None
+		client.send_message(chat_id, f'<pre>{msg}</pre>', 'html')
+
 	def generate_settings(self):
 		return (
 			'<b>Current user id:</b> <code>{owner}</code>\n'
@@ -245,6 +254,7 @@ class bot_search_helper(object):
 					"INSERT INTO `media_cache` (`avatar_id`, `file_id`) VALUE (%s, %s)",
 					(sqlObj['photo_id'], _msg.photo.sizes[-1].file_id)
 				)
+				os.remove('./downloads/user.jpg')
 
 	def handle_accurate_search_user(self, client: Client, msg: Message):
 		args = msg.text.split()
@@ -525,15 +535,13 @@ class bot_search_helper(object):
 		else:
 			return s
 
-	def stop(self):
-		self.bot.stop()
+	def handle_disconnect(self, client: Client):
 		if self._init:
 			self.conn.close()
 
+	def stop(self):
+		self.bot.stop()
+
 if __name__ == "__main__":
 	b = bot_search_helper()
-	try:
-		b.bot.idle()
-	finally:
-		if b._init:
-			b.conn.close()
+	b.bot.idle()
