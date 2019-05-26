@@ -18,6 +18,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from pyrogram import Dialogs, api
+import pyrogram.errors
 import threading
 import traceback
 import time
@@ -61,7 +62,7 @@ class iter_user_messages(threading.Thread):
 				time.sleep(3)
 				offset_date = dialogs.dialogs[-1].top_message.date - 1
 				sqlObj = self.conn.query1("SELECT `last_message_id`, `indexed` FROM `indexed_dialogs` WHERE `user_id` = -1")
-			except api.errors.FloodWait as e:
+			except pyrogram.errors.FloodWait as e:
 				warnings.warn(
 					'Caughted Flood wait, wait {} seconds'.format(e.x),
 					RuntimeWarning
@@ -114,7 +115,7 @@ class iter_user_messages(threading.Thread):
 				try:
 					msg_his = self.client.get_history(user_id, offset_id = offset_id)
 					break
-				except api.errors.FloodWait as e:
+				except pyrogram.errors.FloodWait as e:
 					warnings.warn(
 						'got FloodWait, wait {} seconds'.format(e.x),
 						RuntimeWarning

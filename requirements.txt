@@ -1,3 +1,3 @@
-pyrogram==0.11.0
+pyrogram
 pymysql
 opencc-python-reimplemented

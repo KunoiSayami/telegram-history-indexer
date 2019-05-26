@@ -19,7 +19,8 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
-from pyrogram import Client, Message, User, MessageHandler, Chat, api, DisconnectHandler
+from pyrogram import Client, Message, User, MessageHandler, Chat, api, DisconnectHandler, RawUpdateHandler
+import pyrogram.errors
 import hashlib
 import warnings
 import traceback
@@ -40,7 +41,6 @@ class user_profile(simple_user_profile):
 	def __init__(self, user: User or Chat or None):
 		simple_user_profile.__init__(self, user)
 		if user is None: return
-
 		#self.username = user.username if user.username else None
 		self.photo_id = user.photo.big_file_id if user.photo else None
 
@@ -162,16 +162,21 @@ class history_index_class(object):
 		else:
 			return getattr(msg, _type).file_id
 
-	def _insert_msg(self, msg: Message):
-		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/MagicForward'):
+	def process_magic_function(self, msg: Message):
+		self.client.send(api.functions.messages.ReadHistory(peer = self.client.resolve_peer(msg.chat.id), max_id = msg.message_id))
+		msg.delete()
+		try:
 			args = msg.text.split()
-			self.client.send(api.functions.messages.ReadHistory(self.client.resolve_peer(msg.chat.id), max_id = msg.message_id))
-			msg.delete()
-			try:
+			if msg.text.startswith('/MagicForward'):
 				self.client.forward_messages('self', int(args[1]), int(args[2]), True)
-			except:
-				self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
+			elif msg.text.startswith('/MagicGet'):
+				self.client.send_cached_media(msg.chat.id, args[1], f'/cache `{args[1]}`')
+		except pyrogram.errors.RPCError:
+			self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
 
+	def _insert_msg(self, msg: Message):
+		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
+			self.process_magic_function(msg)
 		if (msg.from_user and msg.chat.id == msg.from_user.id and msg.from_user.is_self): return
 
 		text = msg.text if msg.text else msg.caption if msg.caption else ''

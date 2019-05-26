@@ -21,7 +21,7 @@ from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
 from pyrogram import Client, Message, MessageHandler, Filters, CallbackQueryHandler, CallbackQuery,\
 	InlineKeyboardMarkup, InlineKeyboardButton, DisconnectHandler
-import pyrogram
+import pyrogram.errors
 import hashlib
 import warnings
 import threading
@@ -65,16 +65,11 @@ class bot_search_helper(object):
 		if isinstance(bot_instance, Client):
 			self.bot = bot_instance
 		else:
-
-			if int(pyrogram.__version__.split('.')[1]) > 11:
-				warnings.warn(
-					'Current is not fully support 0.12.0 or above, please use pyrogram==0.11.0 instead',
-					RuntimeWarning
-				)
 			config = ConfigParser()
 			config.read('config.ini')
 			self.bot = Client(
-				session_name = bot_instance if bot_instance != '' else config['account']['indexbot_token'],
+				session_name = 'index_bot',
+				bot_token = bot_instance if bot_instance != '' else config['account']['indexbot_token'],
 				api_hash = config['account']['api_hash'],
 				api_id = config['account']['api_id']
 			)
@@ -111,6 +106,8 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_setting, Filters.private & Filters.user(self.owner) & Filters.command('set')))
 		self.bot.add_handler(MessageHandler(self.handle_close_keyboard, Filters.private & Filters.user(self.owner) & Filters.command('close')))
 		self.bot.add_handler(MessageHandler(self.handle_select_message, Filters.private & Filters.user(self.owner) & Filters.command('select')))
+		self.bot.add_handler(MessageHandler(self.handle_get_document, Filters.private & Filters.user(self.owner) & Filters.command('get')))
+		self.bot.add_handler(MessageHandler(self.handle_insert_cache, Filters.private & Filters.user(self.owner) & Filters.photo & Filters.command('cache')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
 		self.bot.add_handler(DisconnectHandler(self.handle_disconnect))
 
@@ -252,6 +249,16 @@ class bot_search_helper(object):
 				)
 				os.remove('./downloads/user.jpg')
 
+	def _insert_cache(self, file_id: str, bot_file_id: str):
+		_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `avatar_id` = %s", (file_id,))
+		if _sqlObj is None and bot_file_id != '':
+			self.conn.execute(
+				"INSERT INTO `media_cache` (`avatar_id`, `file_id`) VALUE (%s, %s)",
+				(file_id, bot_file_id)
+			)
+		else:
+			return _sqlObj
+
 	def handle_accurate_search_user(self, client: Client, msg: Message):
 		args = msg.text.split()
 		if len(args) != 2:
@@ -299,6 +306,22 @@ class bot_search_helper(object):
 			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count))
 		else:
 			msg.reply(text, True)
+
+	def handle_get_document(self, client: Client, msg: Message):
+		if len(msg.command) == 1:
+			return msg.reply('Please use `/get <file_id>` to get file which is store in telegram')
+		client.send_chat_action(msg.chat.id, 'upload_photo')
+		sqlObj = self._insert_cache(msg.command[1], '')
+		if sqlObj is None:
+			msg.reply(f'/MagicGet {msg.command[1]}')
+		else:
+			client.send_cached_media(msg.chat.id, sqlObj['file_id'], f'`{msg.command[1]}`')
+		
+	def handle_insert_cache(self, client: Client, msg: Message):
+		msg.delete()
+		self._insert_cache(msg.command[1], msg.photo.sizes[-1].file_id)
+		client.send_cached_media(msg.chat.id, msg.photo.sizes[-1].file_id, f'`{msg.command[1]}`')
+		client.send_chat_action(msg.chat.id, 'cancel')
 
 	def generate_args(self, args: list):
 		ccs2t = opencc.OpenCC('s2t')
@@ -472,7 +495,7 @@ class bot_search_helper(object):
 	def generate_detail_keyboard(self, sqlObj: dict):
 		return InlineKeyboardMarkup( inline_keyboard = [
 			[
-				InlineKeyboardButton(text = 'forward', callback_data = f'select fwd {sqlObj["chat_id"]} {sqlObj["message_id"]}'.encode())
+				InlineKeyboardButton(text = 'Forward', callback_data = f'select fwd {sqlObj["chat_id"]} {sqlObj["message_id"]}'.encode())
 			],
 			[
 				InlineKeyboardButton(text = 'Get User Detail', callback_data = f'select get {sqlObj["from_user"]}'.encode()),
@@ -483,15 +506,15 @@ class bot_search_helper(object):
 	def refresh_settings(self, msg: Message):
 		msg.edit(self.generate_settings(), 'html', reply_markup = self.generate_settings_keyboard())
 
-	def generate_message_search_keyboard(self, mode: str, search_id: int, current_index: int, max_index: int):
+	def generate_message_search_keyboard(self, mode: str, search_id: int, current_index: int, max_index: int, *, head: str = 'msg'):
 		current_index += self.page_limit if mode == 'n' else -self.page_limit if mode == 'b' else 0
 		kb = [
 			[
-				InlineKeyboardButton(text = 'Back', callback_data = 'msg b {} {} {}'.format(search_id, current_index, max_index).encode()),
-				InlineKeyboardButton(text = 'Next', callback_data = 'msg n {} {} {}'.format(search_id, current_index, max_index).encode())
+				InlineKeyboardButton(text = 'Back', callback_data = f'{head} b {search_id} {current_index} {max_index}'.encode()),
+				InlineKeyboardButton(text = 'Next', callback_data = f'{head} n {search_id} {current_index} {max_index}'.encode())
 			],
 			[
-				InlineKeyboardButton(text = 'Re-search', callback_data = 'msg r {}'.format(search_id).encode()),
+				InlineKeyboardButton(text = 'Re-search', callback_data = f'{head} r {search_id}'.encode()),
 			]
 		]
 		if current_index + self.page_limit > max_index - 1:
