@@ -356,7 +356,7 @@ class bot_search_helper(object):
 		if len(sqlObj) == 0: return None
 		return InlineKeyboardMarkup( inline_keyboard = [
 			[
-				InlineKeyboardButton( text = x['text'].strip()[:14], callback_data = f'select detail {x["_id"]}'.encode())
+				InlineKeyboardButton( text = x['text'].strip()[:14], callback_data = f'select detail {x["_id"]}')
 			] for x in sqlObj
 		])
 
@@ -365,7 +365,7 @@ class bot_search_helper(object):
 			return msg.reply('Please reply a search result message (except 404 message)', True)
 		if msg.reply_to_message.reply_markup is None or msg.reply_to_message.reply_markup.inline_keyboard[-1][0].text != 'Re-search':
 			return msg.reply('Inline keyboard not found!', True)
-		sqlObj = self.get_msg_search_history(msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.decode().split()[-1])
+		sqlObj = self.get_msg_search_history(msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.split()[-1])
 		if sqlObj is None:
 			return msg.reply('404 Search index not found')
 		step = self.STEP.search(msg.reply_to_message.text).group(1)
@@ -420,7 +420,6 @@ class bot_search_helper(object):
 			<current index id>
 			<max index id>
 		'''
-		msg.data = msg.data.decode()
 		datagroup = msg.data.split()
 
 		if datagroup[0] == 'msg':
@@ -495,11 +494,11 @@ class bot_search_helper(object):
 	def generate_detail_keyboard(self, sqlObj: dict):
 		return InlineKeyboardMarkup( inline_keyboard = [
 			[
-				InlineKeyboardButton(text = 'Forward', callback_data = f'select fwd {sqlObj["chat_id"]} {sqlObj["message_id"]}'.encode())
+				InlineKeyboardButton(text = 'Forward', callback_data = f'select fwd {sqlObj["chat_id"]} {sqlObj["message_id"]}')
 			],
 			[
-				InlineKeyboardButton(text = 'Get User Detail', callback_data = f'select get {sqlObj["from_user"]}'.encode()),
-				InlineKeyboardButton(text = 'Get Chat Detail', callback_data = f'select get {sqlObj["chat_id"]}'.encode())
+				InlineKeyboardButton(text = 'Get User Detail', callback_data = f'select get {sqlObj["from_user"]}'),
+				InlineKeyboardButton(text = 'Get Chat Detail', callback_data = f'select get {sqlObj["chat_id"]}')
 			]
 		])
 
@@ -510,11 +509,11 @@ class bot_search_helper(object):
 		current_index += self.page_limit if mode == 'n' else -self.page_limit if mode == 'b' else 0
 		kb = [
 			[
-				InlineKeyboardButton(text = 'Back', callback_data = f'{head} b {search_id} {current_index} {max_index}'.encode()),
-				InlineKeyboardButton(text = 'Next', callback_data = f'{head} n {search_id} {current_index} {max_index}'.encode())
+				InlineKeyboardButton(text = 'Back', callback_data = f'{head} b {search_id} {current_index} {max_index}'),
+				InlineKeyboardButton(text = 'Next', callback_data = f'{head} n {search_id} {current_index} {max_index}')
 			],
 			[
-				InlineKeyboardButton(text = 'Re-search', callback_data = f'{head} r {search_id}'.encode()),
+				InlineKeyboardButton(text = 'Re-search', callback_data = f'{head} r {search_id}'),
 			]
 		]
 		if current_index + self.page_limit > max_index - 1:
