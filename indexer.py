@@ -230,7 +230,7 @@ class history_index_class(object):
 
 	def _user_profile_track(self, msg: Message):
 		users = [x.raw for x in list(set(user_profile(x) for x in [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat]))]
-		users.remove(None)
+		if None in users: users.remove(None)
 		self.real_user_index(users)
 
 	def user_profile_track(self, msg: Message):

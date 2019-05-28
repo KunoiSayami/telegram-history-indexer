@@ -31,6 +31,7 @@ import math
 import re
 import opencc
 import itertools
+import traceback
 
 class user(object):
 	def __init__(self, user_id: int, first_name: str, last_name: str or None = None, photo_id: str or None = None, **_kwargs):
@@ -62,6 +63,8 @@ class bot_search_helper(object):
 		self.show_info_detail = None
 
 		self.owner = owner_id
+		self.cache_channel = 0
+
 		if isinstance(bot_instance, Client):
 			self.bot = bot_instance
 		else:
@@ -74,6 +77,7 @@ class bot_search_helper(object):
 				api_id = config['account']['api_id']
 			)
 			self.owner = int(config['account']['owner'])
+			self.cache_channel = int(config['account']['cache_channel'])
 
 		if conn is None:
 
@@ -96,7 +100,8 @@ class bot_search_helper(object):
 			self.conn = conn
 			self._init = True
 
-		self.query_lock = threading.Lock()
+		self.db_query_lock = threading.Lock()
+		self.db_search_lock = threading.Lock()
 		self.search_lock = threading.Lock()
 
 		self.bot.add_handler(MessageHandler(self.handle_forward, Filters.private & Filters.user(self.owner) & Filters.forwarded), -1)
@@ -108,6 +113,8 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_select_message, Filters.private & Filters.user(self.owner) & Filters.command('select')))
 		self.bot.add_handler(MessageHandler(self.handle_get_document, Filters.private & Filters.user(self.owner) & Filters.command('get')))
 		self.bot.add_handler(MessageHandler(self.handle_insert_cache, Filters.private & Filters.user(self.owner) & Filters.photo & Filters.command('cache')))
+		self.bot.add_handler(MessageHandler(self.handle_incoming_image, Filters.media & Filters.chat(self.cache_channel)))
+		self.bot.add_handler(MessageHandler(self.handle_query_media, Filters.private & Filters.user(self.owner) & Filters.command('qm')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
 		self.bot.add_handler(DisconnectHandler(self.handle_disconnect))
 
@@ -251,11 +258,12 @@ class bot_search_helper(object):
 
 	def _insert_cache(self, file_id: str, bot_file_id: str):
 		_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `avatar_id` = %s", (file_id,))
-		if _sqlObj is None and bot_file_id != '':
-			self.conn.execute(
-				"INSERT INTO `media_cache` (`avatar_id`, `file_id`) VALUE (%s, %s)",
-				(file_id, bot_file_id)
-			)
+		if _sqlObj is None:
+			if bot_file_id != '':
+				self.conn.execute(
+					"INSERT INTO `media_cache` (`avatar_id`, `file_id`) VALUE (%s, %s)",
+					(file_id, bot_file_id)
+				)
 		else:
 			return _sqlObj
 
@@ -298,10 +306,10 @@ class bot_search_helper(object):
 
 		search_check = self.check_duplicate_msg_history_search_request(args)
 		if search_check is None:
-			search_check = self.insert_msg_query_history(args)
+			search_check = self.insert_msg_search_history(args)
 		search_id, timestamp = search_check['_id'], search_check['timestamp']
 
-		text, max_count = self.query_message_history(args, timestamp = timestamp)
+		text, max_count = self.query_history(args, timestamp = timestamp)
 		if max_count:
 			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count))
 		else:
@@ -316,14 +324,37 @@ class bot_search_helper(object):
 			msg.reply(f'/MagicGet {msg.command[1]}')
 		else:
 			client.send_cached_media(msg.chat.id, sqlObj['file_id'], f'`{msg.command[1]}`')
-		
+
+	@staticmethod
+	def get_msg_type(msg: Message):
+		return 'photo' if msg.photo else \
+			'video' if msg.video else \
+			'animation' if msg.animation else \
+			'document' if msg.document else \
+			'text' if msg.text else \
+			'voice' if msg.voice else'error'
+
+	@staticmethod
+	def get_file_id(msg: Message, _type: str):
+		if _type == 'photo':
+			return msg.photo.sizes[-1].file_id
+		else:
+			return getattr(msg, _type).file_id
+
+	def handle_incoming_image(self, client: Client, msg: Message):
+		msg.delete()
+		self._insert_cache(msg.caption, self.get_file_id(msg, self.get_msg_type(msg)))
+	
 	def handle_insert_cache(self, client: Client, msg: Message):
 		msg.delete()
-		self._insert_cache(msg.command[1], msg.photo.sizes[-1].file_id)
-		client.send_cached_media(msg.chat.id, msg.photo.sizes[-1].file_id, f'`{msg.command[1]}`')
+		file_id = self.get_file_id(msg, self.get_msg_type(msg))
+		self._insert_cache(msg.command[1], file_id)
+		client.send_cached_media(msg.chat.id, file_id, f'`{msg.command[1]}`')
 		client.send_chat_action(msg.chat.id, 'cancel')
 
 	def generate_args(self, args: list):
+		if len(args) == 0:
+			return [], ''
 		ccs2t = opencc.OpenCC('s2t')
 		if isinstance(args, tuple):
 			args = list(args)
@@ -331,26 +362,58 @@ class bot_search_helper(object):
 		SqlStr = ' AND '.join(['({})'.format(' OR '.join('`text` LIKE %s' for y in x)) for x in tmp])
 		return list(itertools.chain.from_iterable(tmp)), SqlStr
 
-	def query_message_history(self, args: list, step: int = 0, timestamp: str or "datetime.datetime" = '', *, callback: "callable" = None):
+	def generate_options(self, sqlStr: str, timestamp: str):
+		options = list(set([sqlStr, self.settings_to_sql_options(), timestamp]))
+		if '' in options:
+			options.remove('')
+		optionsStr = ' AND '.join(options)
+		if optionsStr == '':
+			optionsStr = '1 = 1'
+		return optionsStr
+
+	def query_history(self, args: list, step: int = 0, timestamp: str or "datetime.datetime" = '', *, callback: "callable" = None, table: str = 'index', type: str = ''):
 		'''need passing origin args to this function'''
 		args, sqlStr = self.generate_args(args)
 
+		origin_timestamp = timestamp
 		if timestamp != '':
-			timestamp = f' AND `timestamp` < \'{timestamp}\''
+			timestamp = f'`timestamp` < \'{timestamp}\''
 
-		max_count = self.conn.query1(f"SELECT COUNT(*) AS `count` FROM `index` WHERE {sqlStr} AND {self.settings_to_sql_options()} {timestamp}", args)['count']
+		optionsStr = self.generate_options(sqlStr, timestamp)
+
+		max_count = self.conn.query1(f"SELECT COUNT(*) AS `count` FROM `{table}` WHERE {optionsStr}", args)['count']
 		if max_count:
-			sqlObj = self.conn.query(f"SELECT * FROM `index` WHERE {sqlStr} AND {self.settings_to_sql_options()} {timestamp} ORDER BY `timestamp` DESC LIMIT {step}, {self.page_limit}".format(
-				), args)
+			sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {step}, {self.page_limit}", args)
 			if callback: return callback(sqlObj)
 			return '{3}\n\nPage: {0} / {1}\nLast_query: <code>{2}</code>'.format(
 				(step // self.page_limit) + 1,
 				# From: https://www.geeksforgeeks.org/g-fact-35-truncate-in-python/
 				math.ceil(max_count / self.page_limit),
-				time.strftime('%Y-%m-%d %H:%M:%S'),
+				origin_timestamp,
 				'\n'.join(self.show_query_msg_result(x) for x in sqlObj)
 			), max_count
 		return '404 Not found', 0
+
+	def handle_query_media(self, client: Client, msg: Message):
+		if len(msg.command) > 1 and msg.command[1] not in ('document','photo','video','animation','voice'):
+			return msg.reply('Please use `/qm [<type> [<keyword1> <keyword2> ...]]` to query media file')
+
+		args = msg.command[2:]
+		_type = msg.command[1] if len(msg.command) > 1 else None
+
+		if len(repr(args)) > 128:
+			return msg.reply('Query option too long!')
+
+		search_check = self.check_duplicate_msg_history_query_request(_type, args)
+		if search_check is None:
+			search_check = self.insert_msg_query_history(_type, args)
+		search_id, timestamp = search_check['_id'], search_check['timestamp']
+
+		text, max_count = self.query_history(msg.command[1:], 0, timestamp, table = 'document_index')
+		if max_count:
+			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count, head = 'doc'))
+		else:
+			msg.reply(text, True)
 
 	def generate_select_keyboard(self, sqlObj: dict):
 		if len(sqlObj) == 0: return None
@@ -365,11 +428,11 @@ class bot_search_helper(object):
 			return msg.reply('Please reply a search result message (except 404 message)', True)
 		if msg.reply_to_message.reply_markup is None or msg.reply_to_message.reply_markup.inline_keyboard[-1][0].text != 'Re-search':
 			return msg.reply('Inline keyboard not found!', True)
-		sqlObj = self.get_msg_search_history(msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.split()[-1])
+		sqlObj = self.get_msg_history(msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.split()[-1])
 		if sqlObj is None:
 			return msg.reply('404 Search index not found')
 		step = self.STEP.search(msg.reply_to_message.text).group(1)
-		kb = self.query_message_history(eval(sqlObj['args']), (int(step) - 1) * self.page_limit, sqlObj['timestamp'], callback = self.generate_select_keyboard)
+		kb = self.query_history(eval(sqlObj['args']), (int(step) - 1) * self.page_limit, sqlObj['timestamp'], callback = self.generate_select_keyboard)
 		if isinstance(kb, tuple):
 			return
 		msg.reply('Please select a message:', True, reply_markup = kb)
@@ -391,15 +454,17 @@ class bot_search_helper(object):
 				args.append(f'`from_user` = {self.specify_id}')
 
 		if len(args) == 0:
-			return '1 = 1'
+			return ''
 		else:
-			return ' AND '.join(args)
+			return f"{' AND '.join(args)}"
 
 	def show_query_msg_result(self, d: dict):
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-		if len(d['text']) > 750: # prevert message too long
+		if d['text'] and len(d['text']) > 750: # prevert message too long
 			d['text'] = d['text'][:750] + '...'
 		d['forward_info'] = '<b>Forward From</b>: <code>{}</code>\n'.format(d['forward_from']) if d['forward_from'] else ''
+		d['text_info'] = '<b>Text</b>:\n<pre>{}</pre>\n'.format(d['text']) if d['text'] else ''
+		d['media_info'] = '<b>File type</b>: <code>{0}</code>\n<b>File id</b>: <code>{1}</code>\n'.format(d['type'], d['file_id']) if 'type' in d else ''
 
 		return (
 			'<b>Chat id</b>: <code>{chat_id}</code>\n'
@@ -407,7 +472,8 @@ class bot_search_helper(object):
 			'<b>Message id</b>: <code>{message_id}</code>\n'
 			'<b>Timestamp</b>: <code>{timestamp}</code>\n'
 			'{forward_info}'
-			'<b>Text</b>:\n<pre>{text}</pre>\n'
+			'{media_info}'
+			'{text_info}'
 		).format(**d)
 
 	def handle_query_callback(self, client: Client, msg: CallbackQuery):
@@ -420,19 +486,38 @@ class bot_search_helper(object):
 			<current index id>
 			<max index id>
 		'''
+		#msg.data = msg.data.decode()
 		datagroup = msg.data.split()
 
 		if datagroup[0] == 'msg':
 
 			if datagroup[1] in ('n', 'b', 'r'):
-				sqlObj = self.get_msg_search_history(datagroup[2])
+				sqlObj = self.get_msg_history(datagroup[2])
 				args = eval(sqlObj['args'])
 				step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
-				text, max_index = self.query_message_history(args, step, sqlObj['timestamp'])
+				text, max_index = self.query_history(args, step, sqlObj['timestamp'])
 				if datagroup[1] != 'r':
 					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]))
 				else:
 					reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index)
+				msg.message.edit(
+					text,
+					parse_mode = 'html',
+					reply_markup = reply_markup
+				)
+
+		elif datagroup[0] == 'doc':
+			
+			if datagroup[1] in ('n', 'b', 'r'):
+				sqlObj = self.get_msg_history(datagroup[2], 'query')
+				args = eval(sqlObj['args'])
+				_type = eval(sqlObj['type']) if sqlObj['type'] else None
+				step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
+				text, max_index = self.query_history(args, step, sqlObj['timestamp'], table = 'document_index', type = _type)
+				if datagroup[1] != 'r':
+					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]), head = 'doc')
+				else:
+					reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index, head = 'doc')
 				msg.message.edit(
 					text,
 					parse_mode = 'html',
@@ -484,10 +569,10 @@ class bot_search_helper(object):
 		msg.answer()
 
 	def generate_detail_msg(self, sqlObj: dict):
-		userObj = self.conn.query1("SELECT * FROM `user_history` WHERE `user_id` = %s", (sqlObj['from_user'],))
+		userObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['from_user'],))
 		r = self.generate_user_info(userObj)
 		if sqlObj['chat_id'] != sqlObj['from_user']:
-			chatObj = self.conn.query1("SELECT * FROM `user_history` WHERE `user_id` = %s", (sqlObj['chat_id'],))
+			chatObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['chat_id'],))
 			r += f'\n\nChat:\n{self.generate_user_info(chatObj)}'
 		return f'Message Details:\nFrom User:\n{r}\n\n{self.show_query_msg_result(sqlObj)}'
 
@@ -524,20 +609,36 @@ class bot_search_helper(object):
 			kb.pop(0)
 		return InlineKeyboardMarkup(inline_keyboard = kb)
 
-	def insert_msg_query_history(self, args: list):
-		with self.query_lock:
-			self.conn.execute("INSERT INTO `search_history` (`args`, `hash`) VALUE (%s, %s)", (repr(args), self.get_msg_query_hash(args)))
+	def insert_msg_search_history(self, args: list):
+		with self.db_search_lock:
+			self.conn.execute("INSERT INTO `search_history` (`args`, `hash`) VALUE (%s, %s)", (repr(args), self.get_msg_search_hash(args)))
 			return self.conn.query1("SELECT `_id`, `timestamp` FROM `search_history` ORDER BY `_id` DESC LIMIT 1")
 
 	def check_duplicate_msg_history_search_request(self, args: list):
-		return self.conn.query1("SELECT `_id`, `timestamp` FROM `search_history` WHERE `hash` = %s", self.get_msg_query_hash(args))
+		return self.conn.query1("SELECT `_id`, `timestamp` FROM `search_history` WHERE `hash` = %s", self.get_msg_search_hash(args))
 
-	def get_msg_search_history(self, _id: int):
-		return self.conn.query1("SELECT `args`, `timestamp` FROM `search_history` WHERE `_id` = %s", (_id,))
+	def get_msg_history(self, _id: int, table: str = 'search'):
+		if table == 'search':
+			return self.conn.query1(f"SELECT `args`, `timestamp` FROM `{table}_history` WHERE `_id` = %s", (_id,))
+		else:
+			return self.conn.query1(f"SELECT `args`, `type`, `timestamp` FROM `{table}_history` WHERE `_id` = %s", (_id,))
+
+	def insert_msg_query_history(self, _type: str, args: list):
+		with self.db_query_lock:
+			self.conn.execute("INSERT INTO `query_history` (`type`, `args`, `hash`) VALUE (%s, %s, %s)", (_type, repr(args), self.get_msg_query_hash(_type, args)))
+			return self.conn.query1("SELECT `_id`, `timestamp` FROM `query_history` ORDER BY `_id` DESC LIMIT 1")
+
+	def check_duplicate_msg_history_query_request(self, _type: str, args: list):
+		return self.conn.query1("SELECT `_id`, `timestamp` FROM `query_history` WHERE `hash` = %s", self.get_msg_query_hash(_type, args))
 
 	@staticmethod
-	def get_msg_query_hash(args: list):
+	def get_msg_search_hash(args: list):
 		return hashlib.sha256(repr(args).encode()).hexdigest()
+
+	@staticmethod
+	def get_msg_query_hash(_type: str, args: list):
+		if _type is None: _type = ''
+		return hashlib.sha256((repr(args) + _type).encode()).hexdigest()
 
 	@staticmethod
 	def _getbool(s):
