@@ -23,6 +23,7 @@ import threading
 import traceback
 import time
 import warnings
+from datetime import datetime
 
 class iter_user_messages(threading.Thread):
 	def __init__(self, indexer):
@@ -30,6 +31,7 @@ class iter_user_messages(threading.Thread):
 		self.client = indexer.client
 		self.conn = indexer.conn
 		self.indexer = indexer
+		self.end_time = time.time() - 1800
 
 	def run(self):
 		self.get_dialogs()
@@ -38,7 +40,7 @@ class iter_user_messages(threading.Thread):
 	def _indenify_user(self, users: list):
 		userinfos = self.client.get_users(users)
 		for x in userinfos:
-			self.indexer._real_user_index(x)
+			self.indexer.user_profile_track(x)
 		self.conn.commit()
 
 	def indenify_user(self):
@@ -108,9 +110,9 @@ class iter_user_messages(threading.Thread):
 			self.conn.execute("UPDATE `indexed_dialogs` SET `indexed` = 'Y' WHERE `user_id` = %s", (sqlObj['user_id'],))
 			self.conn.commit()
 
-	def _process_messages(self, user_id: int, offset_id: int):
+	def _process_messages(self, user_id: int, offset_id: int, *, force_check: bool = False):
 		while offset_id > 1:
-			print(offset_id)
+			print(user_id, offset_id)
 			while True:
 				try:
 					msg_his = self.client.get_history(user_id, offset_id = offset_id)
@@ -121,14 +123,47 @@ class iter_user_messages(threading.Thread):
 						RuntimeWarning
 					)
 					time.sleep(e.x)
-			self.__process_messages(msg_his.messages)
+			if self.__process_messages(msg_his.messages, force_check):
+				break
 			try:
 				offset_id = msg_his.messages[-1].message_id - 1
 			except IndexError:
 				break
 			time.sleep(3)
 
-	def __process_messages(self, msg_group: list):
+	def __process_messages(self, msg_group: list, force_check: bool = False):
 		with self.indexer._lock_msg:
 			for x in msg_group:
-				self.indexer._insert_msg(x)
+				self.indexer._insert_msg(x, force_check)
+				if x.date < self.end_time:
+					return True
+		return
+
+	def recheck(self, force_check: bool = False):
+		sqlObj = self.conn.query1("SELECT `timestamp` FROM `index` ORDER BY `timestamp` DESC LIMIT 1")
+		if force_check or (sqlObj and (datetime.now() - sqlObj['timestamp']).total_seconds() > 60 * 30):
+			threading.Thread(target = self._recheck, daemon = True).start()
+
+	def _recheck(self):
+		while not self.client.is_started: time.sleep(0.01)
+		offset_date = 0
+		chats = []
+		while True:
+			try:
+				dialogs = self.client.get_dialogs(offset_date)
+				for x in dialogs.dialogs:
+					if x.top_message.date < self.end_time:
+						raise IndexError
+					chats.append((x.chat.id, x.top_message.message_id))
+				offset_date = dialogs.dialogs[-1].top_message.date - 1
+			except pyrogram.errors.FloodWait as e:
+				warnings.warn(
+					f'Caughted Flood wait, wait {e.x} seconds',
+					RuntimeWarning
+				)
+				time.sleep(e.x)
+			except IndexError:
+				break
+		print(chats)
+		for x in chats:
+			self._process_messages(x[0], x[1], force_check = True)

@@ -105,7 +105,7 @@ class bot_search_helper(object):
 		self.search_lock = threading.Lock()
 
 		self.bot.add_handler(MessageHandler(self.handle_forward, Filters.private & Filters.user(self.owner) & Filters.forwarded), -1)
-		self.bot.add_handler(MessageHandler(self.handle_search_user_history, Filters.private & Filters.user(self.owner) & Filters.command('su')))
+		self.bot.add_handler(MessageHandler(self.handle_search_user, Filters.private & Filters.user(self.owner) & Filters.command('su')))
 		self.bot.add_handler(MessageHandler(self.handle_search_message_history, Filters.private & Filters.user(self.owner) & Filters.command('sm')))
 		self.bot.add_handler(MessageHandler(self.handle_accurate_search_user, Filters.private & Filters.user(self.owner) & Filters.command('ua')))
 		self.bot.add_handler(MessageHandler(self.handle_setting, Filters.private & Filters.user(self.owner) & Filters.command('set')))
@@ -172,7 +172,6 @@ class bot_search_helper(object):
 				self.is_specify_id, self.is_specify_chat, self.specify_id, self.page_limit, self.owner
 			)]
 		)
-		self.conn.commit()
 
 	def set_page_limit(self, limit: int):
 		limit = int(limit)
@@ -227,7 +226,7 @@ class bot_search_helper(object):
 			]
 		])
 
-	def handle_search_user_history(self, _client: Client, msg: Message):
+	def handle_search_user(self, _client: Client, msg: Message):
 		args = msg.text.split()
 		if len(args) != 2:
 			return msg.reply('Please use `/su <username>` to search database', True)
@@ -344,7 +343,7 @@ class bot_search_helper(object):
 	def handle_incoming_image(self, client: Client, msg: Message):
 		msg.delete()
 		self._insert_cache(msg.caption, self.get_file_id(msg, self.get_msg_type(msg)))
-	
+
 	def handle_insert_cache(self, client: Client, msg: Message):
 		msg.delete()
 		file_id = self.get_file_id(msg, self.get_msg_type(msg))
@@ -459,6 +458,7 @@ class bot_search_helper(object):
 			return f"{' AND '.join(args)}"
 
 	def show_query_msg_result(self, d: dict):
+		d = self.msg_detail_process(d)
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
 		if d['text'] and len(d['text']) > 750: # prevert message too long
 			d['text'] = d['text'][:750] + '...'
@@ -476,6 +476,17 @@ class bot_search_helper(object):
 			'{text_info}'
 		).format(**d)
 
+	def msg_detail_process(self, d: dict):
+		if not self.show_info_detail: return d
+
+	def generate_detail_msg(self, sqlObj: dict):
+		userObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['from_user'],))
+		r = self.generate_user_info(userObj)
+		if sqlObj['chat_id'] != sqlObj['from_user']:
+			chatObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['chat_id'],))
+			r += f'\nChat:{self.generate_user_info(chatObj)}'
+		return f'Message Details:\nFrom User:\n{r}\n\n{self.show_query_msg_result(sqlObj)}'
+
 	def handle_query_callback(self, client: Client, msg: CallbackQuery):
 		'''
 			Callback data structure:
@@ -489,35 +500,27 @@ class bot_search_helper(object):
 		#msg.data = msg.data.decode()
 		datagroup = msg.data.split()
 
-		if datagroup[0] == 'msg':
+		if datagroup[0] in ('msg', 'doc'):
 
 			if datagroup[1] in ('n', 'b', 'r'):
-				sqlObj = self.get_msg_history(datagroup[2])
-				args = eval(sqlObj['args'])
-				step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
-				text, max_index = self.query_history(args, step, sqlObj['timestamp'])
-				if datagroup[1] != 'r':
-					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]))
+				sqlObj = self.get_msg_history(datagroup[2], 'query' if datagroup[0] == 'doc' else 'search')
+				if datagroup[0] == 'doc':
+					_type = eval(sqlObj['type']) if sqlObj['type'] else None
+					queryArg = dict(table = 'document_index', type = _type)
+					keyboardArg = dict(head = 'doc')
 				else:
-					reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index)
-				msg.message.edit(
-					text,
-					parse_mode = 'html',
-					reply_markup = reply_markup
-				)
-
-		elif datagroup[0] == 'doc':
-			
-			if datagroup[1] in ('n', 'b', 'r'):
-				sqlObj = self.get_msg_history(datagroup[2], 'query')
+					queryArg, keyboardArg = {}, {}
 				args = eval(sqlObj['args'])
-				_type = eval(sqlObj['type']) if sqlObj['type'] else None
+				if datagroup[1] == 'r':
+					timestr = time.strftime('%Y-%m-%d %H:%M:%S')
+					self.conn.execute(f"UPDATE `{'search' if datagroup[0] == 'msg' else 'query'}_history` SET `timestamp` = %s WHERE `_id` = %s", (timestr, datagroup[2]))
+					sqlObj['timestamp'] = timestr
 				step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
-				text, max_index = self.query_history(args, step, sqlObj['timestamp'], table = 'document_index', type = _type)
+				text, max_index = self.query_history(args, step, sqlObj['timestamp'], **queryArg)
 				if datagroup[1] != 'r':
-					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]), head = 'doc')
+					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]), **keyboardArg)
 				else:
-					reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index, head = 'doc')
+					reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index, **keyboardArg)
 				msg.message.edit(
 					text,
 					parse_mode = 'html',
@@ -567,14 +570,6 @@ class bot_search_helper(object):
 				self._handle_accurate_search_user(client, msg.message, datagroup[1:])
 
 		msg.answer()
-
-	def generate_detail_msg(self, sqlObj: dict):
-		userObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['from_user'],))
-		r = self.generate_user_info(userObj)
-		if sqlObj['chat_id'] != sqlObj['from_user']:
-			chatObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['chat_id'],))
-			r += f'\n\nChat:\n{self.generate_user_info(chatObj)}'
-		return f'Message Details:\nFrom User:\n{r}\n\n{self.show_query_msg_result(sqlObj)}'
 
 	def generate_detail_keyboard(self, sqlObj: dict):
 		return InlineKeyboardMarkup( inline_keyboard = [

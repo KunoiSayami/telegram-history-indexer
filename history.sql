@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS `document_index` (
   `forward_from` bigint(20) DEFAULT NULL,
   `message_id` int(11) unsigned NOT NULL,
   `text` text COLLATE utf8mb4_unicode_ci,
-  `type` enum('document','photo','video','animation') CHARACTER SET utf8 COLLATE utf8_unicode_ci NOT NULL,
+  `type` enum('document','photo','video','animation','voice') CHARACTER SET utf8 COLLATE utf8_unicode_ci NOT NULL,
   `file_id` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci NOT NULL,
   `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`_id`)
@@ -49,6 +49,17 @@ CREATE TABLE IF NOT EXISTS `media_cache` (
   `file_id` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
   PRIMARY KEY (`avatar_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+-- Dumping structure for table query_history
+DROP TABLE IF EXISTS `query_history`;
+CREATE TABLE IF NOT EXISTS `query_history` (
+  `_id` int(11) NOT NULL AUTO_INCREMENT,
+  `type` enum('document','photo','video','animation','voice') CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
+  `args` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `hash` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci NOT NULL,
+  PRIMARY KEY (`_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Dumping structure for table search_history
 DROP TABLE IF EXISTS `search_history`;
