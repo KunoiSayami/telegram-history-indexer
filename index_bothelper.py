@@ -30,7 +30,7 @@ import math
 import re
 import opencc
 import itertools
-from type_user import user
+from type_user import hashable_user as user
 
 class bot_search_helper(object):
 	STEP = re.compile(r'Page: (\d+) / \d+')
@@ -248,6 +248,7 @@ class bot_search_helper(object):
 					"INSERT INTO `media_cache` (`avatar_id`, `file_id`) VALUE (%s, %s)",
 					(file_id, bot_file_id)
 				)
+				print(file_id, bot_file_id)
 		else:
 			return _sqlObj
 
@@ -325,7 +326,7 @@ class bot_search_helper(object):
 		else:
 			return getattr(msg, _type).file_id
 
-	def handle_incoming_image(self, client: Client, msg: Message):
+	def handle_incoming_image(self, _client: Client, msg: Message):
 		msg.delete()
 		self._insert_cache(msg.caption, self.get_file_id(msg, self.get_msg_type(msg)))
 
@@ -336,14 +337,20 @@ class bot_search_helper(object):
 		client.send_cached_media(msg.chat.id, file_id, f'`{msg.command[1]}`')
 		client.send_chat_action(msg.chat.id, 'cancel')
 
-	def generate_args(self, args: list):
-		if len(args) == 0:
+	def generate_args(self, args: list, _type: str):
+		if len(args) == 0 and _type == '':
 			return [], ''
 		ccs2t = opencc.OpenCC('s2t')
 		if isinstance(args, tuple):
 			args = list(args)
 		tmp = list(tuple(set(items)) for items in map(lambda x : (f'%{x}%', f'%{ccs2t.convert(x)}%'), args))
 		SqlStr = ' AND '.join(['({})'.format(' OR '.join('`text` LIKE %s' for y in x)) for x in tmp])
+		if _type != '':
+			if SqlStr != '':
+				SqlStr = ' AND '.join((SqlStr, '`type` = %s'))
+			else:
+				SqlStr = '`type` = %s'
+			tmp.append((_type,))
 		return list(itertools.chain.from_iterable(tmp)), SqlStr
 
 	def generate_options(self, sqlStr: str, timestamp: str):
@@ -355,9 +362,9 @@ class bot_search_helper(object):
 			optionsStr = '1 = 1'
 		return optionsStr
 
-	def query_history(self, args: list, step: int = 0, timestamp: str or "datetime.datetime" = '', *, callback: "callable" = None, table: str = 'index', type: str = ''):
+	def query_history(self, args: list, step: int = 0, timestamp: str or "datetime.datetime" = '', *, callback: "callable" = None, table: str = 'index', _type: str = ''):
 		'''need passing origin args to this function'''
-		args, sqlStr = self.generate_args(args)
+		args, sqlStr = self.generate_args(args, _type)
 
 		origin_timestamp = timestamp
 		if timestamp != '':
@@ -378,7 +385,7 @@ class bot_search_helper(object):
 			), max_count
 		return '404 Not found', 0
 
-	def handle_query_media(self, client: Client, msg: Message):
+	def handle_query_media(self, _client: Client, msg: Message):
 		if len(msg.command) > 1 and msg.command[1] not in ('document','photo','video','animation','voice'):
 			return msg.reply('Please use `/qm [<type> [<keyword1> <keyword2> ...]]` to query media file')
 
@@ -387,13 +394,12 @@ class bot_search_helper(object):
 
 		if len(repr(args)) > 128:
 			return msg.reply('Query option too long!')
-
 		search_check = self.check_duplicate_msg_history_query_request(_type, args)
 		if search_check is None:
 			search_check = self.insert_msg_query_history(_type, args)
 		search_id, timestamp = search_check['_id'], search_check['timestamp']
 
-		text, max_count = self.query_history(msg.command[1:], 0, timestamp, table = 'document_index')
+		text, max_count = self.query_history(args, 0, timestamp, table = 'document_index', _type = _type)
 		if max_count:
 			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count, head = 'doc'))
 		else:
@@ -417,8 +423,7 @@ class bot_search_helper(object):
 			return msg.reply('404 Search index not found')
 		step = self.STEP.search(msg.reply_to_message.text).group(1)
 		kb = self.query_history(eval(sqlObj['args']), (int(step) - 1) * self.page_limit, sqlObj['timestamp'], callback = self.generate_select_keyboard)
-		if isinstance(kb, tuple):
-			return
+		if isinstance(kb, tuple): return
 		msg.reply('Please select a message:', True, reply_markup = kb)
 
 	def settings_to_sql_options(self):
@@ -490,8 +495,8 @@ class bot_search_helper(object):
 			if datagroup[1] in ('n', 'b', 'r'):
 				sqlObj = self.get_msg_history(datagroup[2], 'query' if datagroup[0] == 'doc' else 'search')
 				if datagroup[0] == 'doc':
-					_type = eval(sqlObj['type']) if sqlObj['type'] else None
-					queryArg = dict(table = 'document_index', type = _type)
+					_type = sqlObj.pop('type')
+					queryArg = dict(table = 'document_index', _type = _type)
 					keyboardArg = dict(head = 'doc')
 				else:
 					queryArg, keyboardArg = {}, {}
@@ -557,7 +562,7 @@ class bot_search_helper(object):
 		msg.answer()
 
 	def generate_detail_keyboard(self, sqlObj: dict):
-		return InlineKeyboardMarkup( inline_keyboard = [
+		kb = [
 			[
 				InlineKeyboardButton(text = 'Forward', callback_data = f'select fwd {sqlObj["chat_id"]} {sqlObj["message_id"]}')
 			],
@@ -565,7 +570,10 @@ class bot_search_helper(object):
 				InlineKeyboardButton(text = 'Get User Detail', callback_data = f'select get {sqlObj["from_user"]}'),
 				InlineKeyboardButton(text = 'Get Chat Detail', callback_data = f'select get {sqlObj["chat_id"]}')
 			]
-		])
+		]
+		if sqlObj['from_user'] == sqlObj['chat_id']:
+			kb[-1].pop(-1)
+		return InlineKeyboardMarkup( inline_keyboard = kb)
 
 	def refresh_settings(self, msg: Message):
 		msg.edit(self.generate_settings(), 'html', reply_markup = self.generate_settings_keyboard())
