@@ -21,7 +21,6 @@ from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
 from pyrogram import Client, Message, MessageHandler, Filters, CallbackQueryHandler, CallbackQuery,\
 	InlineKeyboardMarkup, InlineKeyboardButton, DisconnectHandler
-import pyrogram.errors
 import hashlib
 import warnings
 import threading
@@ -31,21 +30,7 @@ import math
 import re
 import opencc
 import itertools
-import traceback
-
-class user(object):
-	def __init__(self, user_id: int, first_name: str, last_name: str or None = None, photo_id: str or None = None, **_kwargs):
-		self.user_id = user_id
-		self.first_name = first_name
-		self.last_name = last_name
-		self.full_name = '{} {}'.format(first_name, last_name) if last_name else first_name
-		self.photo_id = photo_id
-	def get_dict(self):
-		return {'user_id': self.user_id, 'full_name': self.full_name}
-	def __hash__(self):
-		return hash(self.user_id)
-	def __eq__(self, userObj):
-		return self.user_id == userObj.user_id
+from type_user import user
 
 class bot_search_helper(object):
 	STEP = re.compile(r'Page: (\d+) / \d+')

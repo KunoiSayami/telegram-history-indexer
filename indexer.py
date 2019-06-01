@@ -19,78 +19,20 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
-from pyrogram import Client, Message, User, MessageHandler, Chat, api, DisconnectHandler, RawUpdateHandler
+from pyrogram import Client, Message, User, MessageHandler, Chat, api, DisconnectHandler
 import pyrogram.errors
 import hashlib
-import warnings
 import traceback
 import threading
 import datetime
 from spider import iter_user_messages
-
-class simple_user_profile(object):
-	def __init__(self, user: User or Chat or None):
-		self.raw = user
-		self.user_id = user.id if user != None else None
-	def __hash__(self):
-		return hash(self.user_id)
-	def __eq__(self, sup):
-		return self.user_id == sup.user_id
-
-class user_profile(simple_user_profile):
-	def __init__(self, user: User or Chat or None):
-		simple_user_profile.__init__(self, user)
-		if user is None: return
-		#self.username = user.username if user.username else None
-		self.photo_id = user.photo.big_file_id if user.photo else None
-
-		if isinstance(user, Chat) and user.type not in ('private', 'bot'):
-			self.first_name = self.full_name = user.title
-			self.last_name = None
-		else:
-			self.first_name = user.first_name
-			self.last_name = user.last_name if user.last_name else None
-			self.full_name = '{} {}'.format(self.first_name, self.last_name) if self.last_name else self.first_name
-		
-		if self.full_name is None:
-			warnings.warn(
-				'Caughted None first name',
-				RuntimeWarning
-			)
-			self.full_name = ''
-
-		self.hash = hashlib.sha256(','.join((
-			str(self.user_id),
-			self.full_name,
-			self.photo_id if self.photo_id else ''
-		)).encode()).hexdigest()
-
-		if isinstance(user, User):
-			self.sql_insert = (
-				"INSERT INTO `user_history` (`user_id`, `first_name`, `last_name`, `photo_id`) VALUE (%s, %s, %s, %s)",
-				(
-					self.user_id,
-					#self.username,
-					self.first_name,
-					self.last_name,
-					self.photo_id,
-				)
-			)
-		else:
-			self.sql_insert = (
-				"INSERT INTO `user_history` (`user_id`, `first_name` , `photo_id`) VALUE (%s, %s, %s)",
-				(
-					self.user_id,
-					#self.username,
-					self.full_name,
-					self.photo_id,
-				)
-			)
+from type_user import user_profile
 
 class history_index_class(object):
-	def __init__(self, client: Client = None, conn: mysqldb = None):
+	def __init__(self, client: Client = None, conn: mysqldb = None, other_client: Client or bool = None):
 		self._lock_user = threading.Lock()
 		self._lock_msg = threading.Lock()
+		self.other_client = other_client
 		if client is None:
 			config = ConfigParser()
 			config.read('config.ini')
@@ -99,8 +41,17 @@ class history_index_class(object):
 				api_hash = config['account']['api_hash'],
 				api_id = config['account']['api_id']
 			)
+			if isinstance(other_client, bool) and other_client:
+				self.other_client = Client(
+					session_name = 'other_session',
+					api_hash = config['account']['api_hash'],
+					api_id = config['account']['api_id']
+				)
 		else:
 			self.client = client
+
+		if self.other_client is None:
+			self.other_client = self.client
 
 		self.bot_id = 0
 
@@ -128,10 +79,15 @@ class history_index_class(object):
 		self.client.add_handler(DisconnectHandler(self.handle_disconnect), 999)
 
 		self.index_dialog = iter_user_messages(self)
-
+		self.index_dialog.recheck()
 
 	def handle_all_message(self, _: Client, msg: Message):
 		threading.Thread(target = self._thread, args = (msg,), daemon = True).start()
+
+	def start(self):
+		if self.other_client != self.client:
+			self.other_client.start()
+		self.client.start()
 
 	def _thread(self, msg: Message):
 		self.user_profile_track(msg)
@@ -174,7 +130,7 @@ class history_index_class(object):
 		except pyrogram.errors.RPCError:
 			self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
 
-	def _insert_msg(self, msg: Message):
+	def _insert_msg(self, msg: Message, force_check: bool = False):
 		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
 			self.process_magic_function(msg)
 		if (msg.from_user and msg.chat.id == msg.from_user.id and msg.from_user.is_self): return
@@ -190,11 +146,12 @@ class history_index_class(object):
 			else:
 				msg_type = 'text'
 
-		if msg.edit_date:
-			sqlObj = self.conn.query1("SELECT `_id` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
+		if msg.edit_date or force_check:
+			sqlObj = self.conn.query1("SELECT `_id`, `text` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
 					'document_' if msg_type != 'text' else ''
 				), (msg.chat.id, msg.message_id))
 			if sqlObj is not None:
+				if force_check and text == sqlObj['text']: return
 				self.conn.execute("UPDATE `{}index` SET `text` = %s WHERE `_id` = %s".format(
 						'document_' if msg_type != 'text' else ''
 					), (text, sqlObj['_id']))
@@ -229,8 +186,8 @@ class history_index_class(object):
 		return True
 
 	def _user_profile_track(self, msg: Message):
-		users = [x.raw for x in list(set(user_profile(x) for x in [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat]))]
-		if None in users: users.remove(None)
+		users = [x.raw for x in list(set(user_profile(x) for x in [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat, msg.via_bot]))]
+		users.remove(None)
 		self.real_user_index(users)
 
 	def user_profile_track(self, msg: Message):
@@ -300,3 +257,6 @@ class history_index_class(object):
 	def handle_disconnect(self, _client: Client):
 		if self._init:
 			self.conn.close()
+
+if __name__ == "__main__":
+	history_index_class().start()
