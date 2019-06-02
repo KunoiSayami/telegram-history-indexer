@@ -19,7 +19,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
-from pyrogram import Client, Message, User, MessageHandler, Chat, api, DisconnectHandler
+from pyrogram import Client, Message, User, MessageHandler, Chat, api, DisconnectHandler, ContinuePropagation
 import pyrogram.errors
 import hashlib
 import traceback
@@ -75,11 +75,17 @@ class history_index_class(object):
 			self.conn = conn
 			self._init = False
 
+		self.client.add_handler(MessageHandler(self.pre_process), 999)
 		self.client.add_handler(MessageHandler(self.handle_all_message), 999)
 		self.client.add_handler(DisconnectHandler(self.handle_disconnect), 999)
 
 		self.index_dialog = iter_user_messages(self)
 		self.index_dialog.recheck()
+
+	def pre_process(self, _: Client, msg: Message):
+		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
+			self.process_magic_function(msg)
+		raise ContinuePropagation
 
 	def handle_all_message(self, _: Client, msg: Message):
 		threading.Thread(target = self._thread, args = (msg,), daemon = True).start()
@@ -131,8 +137,6 @@ class history_index_class(object):
 			self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
 
 	def _insert_msg(self, msg: Message, force_check: bool = False):
-		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
-			self.process_magic_function(msg)
 		if (msg.from_user and msg.chat.id == msg.from_user.id and msg.from_user.is_self): return
 
 		text = msg.text if msg.text else msg.caption if msg.caption else ''
@@ -208,7 +212,7 @@ class history_index_class(object):
 			self._real_user_index(x)
 		self.conn.commit()
 
-	def _real_user_index(self, user: User or Chat, disable_get: bool = False):
+	def _real_user_index(self, user: User or Chat, *, enable_request: bool = False):
 		self.insert_username(user)
 		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user.id)
 		profileObj = user_profile(user)
@@ -228,7 +232,7 @@ class history_index_class(object):
 				)
 			)
 			self.conn.execute(*profileObj.sql_insert)
-
+			return True
 		elif profileObj.hash != sqlObj['hash']:
 			self.conn.execute(
 				"UPDATE `user_index` SET `first_name` = %s, `last_name` = %s, `photo_id` = %s, `hash` = %s, `timestamp` = CURRENT_TIMESTAMP() WHERE `user_id` = %s",
@@ -241,14 +245,15 @@ class history_index_class(object):
 				)
 			)
 			self.conn.execute(*profileObj.sql_insert)
-
-		elif not disable_get and (datetime.datetime.now() - sqlObj['last_refresh']).total_seconds() > 3600:
+			return True
+		elif enable_request and (datetime.datetime.now() - sqlObj['last_refresh']).total_seconds() > 3600:
 			if isinstance(user, User):
 				u = self.client.get_users([user.id,])[0]
 			else:
 				u = self.client.get_chat(user.id)
 			self.conn.execute('UPDATE `user_index` SET `last_refresh` = CURRENT_TIMESTAMP() WHERE `user_id` = %s', user.id)
-			return self._real_user_index(u, True)
+			return self._real_user_index(u)
+		return False
 
 	def close(self):
 		if self._init:
