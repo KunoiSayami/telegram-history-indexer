@@ -196,6 +196,9 @@ class bot_search_helper(object):
 	def generate_settings_keyboard(self):
 		return InlineKeyboardMarkup( inline_keyboard = [
 			[
+				InlineKeyboardButton(text = 'Show Detail', callback_data = b'set detail toggle')
+			],
+			[
 				InlineKeyboardButton(text = 'Force query', callback_data = b'set force toggle'),
 				InlineKeyboardButton(text = 'User only', callback_data = b'set only user'),
 				InlineKeyboardButton(text = 'Group only', callback_data = b'set only group')
@@ -345,7 +348,7 @@ class bot_search_helper(object):
 			args = list(args)
 		tmp = list(tuple(set(items)) for items in map(lambda x : (f'%{x}%', f'%{ccs2t.convert(x)}%'), args))
 		SqlStr = ' AND '.join(['({})'.format(' OR '.join('`text` LIKE %s' for y in x)) for x in tmp])
-		if _type != '':
+		if _type != '' and _type is not None:
 			if SqlStr != '':
 				SqlStr = ' AND '.join((SqlStr, '`type` = %s'))
 			else:
@@ -452,13 +455,13 @@ class bot_search_helper(object):
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
 		if d['text'] and len(d['text']) > 750: # prevert message too long
 			d['text'] = d['text'][:750] + '...'
-		d['forward_info'] = '<b>Forward From</b>: <code>{}</code>\n'.format(d['forward_from']) if d['forward_from'] else ''
+		d['forward_info'] = '<b>Forward From</b>: <code>{}</code>{detail_switch}\n'.format(d['forward_from']) if d['forward_from'] else ''
 		d['text_info'] = '<b>Text</b>:\n<pre>{}</pre>\n'.format(d['text']) if d['text'] else ''
 		d['media_info'] = '<b>File type</b>: <code>{0}</code>\n<b>File id</b>: <code>{1}</code>\n'.format(d['type'], d['file_id']) if 'type' in d else ''
 
 		return (
-			'<b>Chat id</b>: <code>{chat_id}</code>\n'
-			'<b>From user</b>: <code>{from_user}</code>\n'
+			'<b>Chat id</b>: <code>{chat_id}</code>{detail_switch}\n'
+			'<b>From user</b>: <code>{from_user}</code>{detail_switch}\n'
 			'<b>Message id</b>: <code>{message_id}</code>\n'
 			'<b>Timestamp</b>: <code>{timestamp}</code>\n'
 			'{forward_info}'
@@ -466,8 +469,24 @@ class bot_search_helper(object):
 			'{text_info}'
 		).format(**d)
 
+	def parse_user_info(self, user_id: int):
+		if user_id is None: return None
+		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user_id)
+		if sqlObj is not None:
+			return '{full_name}</code> (<code>{user_id}'.format(**user(**sqlObj).get_dict())
+		else:
+			return user_id
+
 	def msg_detail_process(self, d: dict):
-		if not self.show_info_detail: return d
+		if not self.show_info_detail:
+			d['detail_switch'] = ''
+			return d
+		chat_id, from_user, forward_from = d['chat_id'], d['from_user'], d['forward_from']
+		d['chat_id'] = self.parse_user_info(chat_id)
+		d['from_user'] = self.parse_user_info(from_user)
+		d['forward_from'] = self.parse_user_info(forward_from)
+		d['detail_switch'] = ')'
+		return d
 
 	def generate_detail_msg(self, sqlObj: dict):
 		userObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['from_user'],))
@@ -525,8 +544,8 @@ class bot_search_helper(object):
 				self.refresh_settings(msg.message)
 				return msg.answer('Settings has been reset!')
 
-			elif datagroup[1] == 'refresh':
-				pass
+			elif datagroup[1] == 'detail':
+				self.show_info_detail = not self.show_info_detail
 
 			elif datagroup[1] == 'only':
 				if datagroup[2] == 'user':
@@ -547,6 +566,9 @@ class bot_search_helper(object):
 				self.is_specify_id = False
 				self.is_specify_id = False
 				self.specify_id = 0
+
+			if datagroup[1] != 'refresh':
+				self.update_setting()
 
 			self.refresh_settings(msg.message)
 
