@@ -19,23 +19,32 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
-from pyrogram import Client, Message, User, MessageHandler, Chat, api, DisconnectHandler, ContinuePropagation
+from pyrogram import Client, Message, MessageHandler, api, DisconnectHandler, ContinuePropagation
 import pyrogram.errors
-import hashlib
 import traceback
-import threading
-import datetime
 from spider import iter_user_messages
-from type_user import user_profile
+import logging
+import task
 
 class history_index_class(object):
 	def __init__(self, client: Client = None, conn: mysqldb = None, other_client: Client or bool = None):
-		self._lock_user = threading.Lock()
-		self._lock_msg = threading.Lock()
+		self.logger = logging.getLogger(__name__)
+		self.logger.setLevel(level = logging.WARNING)
+
+		config = ConfigParser()
+		config.read('config.ini')
+
+		self.filter_chat = [x for x in map(int, config['filters']['chat'].split(', '))]
+		self.filter_user = [x for x in map(int, config['filters']['user'].split(', '))]
+
+		self.logger.debug('Filter chat %s', repr(self.filter_chat))
+		self.logger.debug('Filter user %s', repr(self.filter_user))
+
 		self.other_client = other_client
+
+		self.owner = config['account']['owner']
+
 		if client is None:
-			config = ConfigParser()
-			config.read('config.ini')
 			self.client = Client(
 				session_name = 'history_index',
 				api_hash = config['account']['api_hash'],
@@ -56,11 +65,6 @@ class history_index_class(object):
 		self.bot_id = 0
 
 		if conn is None:
-			try:
-				config
-			except NameError:
-				config = ConfigParser()
-				config.read('config.ini')
 
 			self.conn = mysqldb(
 				config['mysql']['host'],
@@ -75,6 +79,13 @@ class history_index_class(object):
 			self.conn = conn
 			self._init = False
 
+		self.trackers = task.msg_tracker_thread_class(
+			self.client,
+			self.conn,
+			self.check_filter
+		)
+		self.trackers.start()
+
 		self.client.add_handler(MessageHandler(self.pre_process), 999)
 		self.client.add_handler(MessageHandler(self.handle_all_message), 999)
 		self.client.add_handler(DisconnectHandler(self.handle_disconnect), 999)
@@ -82,47 +93,29 @@ class history_index_class(object):
 		self.index_dialog = iter_user_messages(self)
 		self.index_dialog.recheck()
 
+		self.logger.info('History indexer init success')
+
+	def check_filter(self, msg: Message):
+		if msg.chat.id in self.filter_chat or \
+			msg.forward_from and msg.forward_from.id in self.filter_user or \
+			msg.from_user and msg.from_user.id in self.filter_user:
+			return True
+		return False
+
 	def pre_process(self, _: Client, msg: Message):
 		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
 			self.process_magic_function(msg)
+		if self.check_filter(msg): return
+		if msg.chat.id == self.owner: return
 		raise ContinuePropagation
 
 	def handle_all_message(self, _: Client, msg: Message):
-		threading.Thread(target = self._thread, args = (msg,), daemon = True).start()
+		self.trackers.push(msg)
 
 	def start(self):
 		if self.other_client != self.client:
 			self.other_client.start()
 		self.client.start()
-
-	def _thread(self, msg: Message):
-		self.user_profile_track(msg)
-		self.insert_msg(msg)
-
-	@staticmethod
-	def get_hash(msg: Message):
-		return hashlib.sha256(','.join((str(msg.chat.id), str(msg.message_id))).encode()).hexdigest()
-
-	def insert_msg(self, msg: Message):
-		with self._lock_msg:
-			if self._insert_msg(msg):
-				self.conn.commit()
-
-	@staticmethod
-	def get_msg_type(msg: Message):
-		return 'photo' if msg.photo else \
-			'video' if msg.video else \
-			'animation' if msg.animation else \
-			'document' if msg.document else \
-			'text' if msg.text else \
-			'voice' if msg.voice else'error'
-
-	@staticmethod
-	def get_file_id(msg: Message, _type: str):
-		if _type == 'photo':
-			return msg.photo.sizes[-1].file_id
-		else:
-			return getattr(msg, _type).file_id
 
 	def process_magic_function(self, msg: Message):
 		self.client.send(api.functions.messages.ReadHistory(peer = self.client.resolve_peer(msg.chat.id), max_id = msg.message_id))
@@ -136,132 +129,14 @@ class history_index_class(object):
 		except pyrogram.errors.RPCError:
 			self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
 
-	def _insert_msg(self, msg: Message, force_check: bool = False):
-		if (msg.from_user and msg.chat.id == msg.from_user.id and msg.from_user.is_self): return
-
-		text = msg.text if msg.text else msg.caption if msg.caption else ''
-
-		if text.startswith('/') and not text.startswith('//'):
-			return
-
-		msg_type = self.get_msg_type(msg)
-		if msg_type == 'error':
-			if text == '': return
-			else:
-				msg_type = 'text'
-
-		if msg.edit_date or force_check:
-			sqlObj = self.conn.query1("SELECT `_id`, `text` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
-					'document_' if msg_type != 'text' else ''
-				), (msg.chat.id, msg.message_id))
-			if sqlObj is not None:
-				if force_check and text == sqlObj['text']: return
-				self.conn.execute("UPDATE `{}index` SET `text` = %s WHERE `_id` = %s".format(
-						'document_' if msg_type != 'text' else ''
-					), (text, sqlObj['_id']))
-				return
-
-		self.conn.execute(
-			"INSERT INTO `index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUE (%s, %s, %s, %s, %s, %s)",
-			(
-				msg.chat.id,
-				msg.message_id,
-				msg.from_user.id if msg.from_user else msg.chat.id,
-				msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
-				text,
-				datetime.datetime.fromtimestamp(msg.date)
-			)
-		)
-		if msg_type != 'text':
-			self.conn.execute(
-				"INSERT INTO `document_index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`, `type`, `file_id`) "
-					"VALUE (%s, %s, %s, %s, %s, %s, %s, %s)",
-				(
-					msg.chat.id,
-					msg.message_id,
-					msg.from_user.id if msg.from_user else msg.chat.id,
-					msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
-					text if len(text) > 0 else None,
-					datetime.datetime.fromtimestamp(msg.date),
-					msg_type,
-					self.get_file_id(msg, msg_type)
-				)
-			)
-		return True
-
-	def _user_profile_track(self, msg: Message):
-		users = [x.raw for x in list(set(user_profile(x) for x in [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat, msg.via_bot]))]
-		users.remove(None)
-		self.real_user_index(users)
-
-	def user_profile_track(self, msg: Message):
-		with self._lock_user:
-			self._user_profile_track(msg)
-
-	def insert_username(self, user: User or Chat):
-		if user.username is None:
-			return
-		sqlObj = self.conn.query1("SELECT `username` FROM `username_history` WHERE `user_id` = %s ORDER BY `_id` DESC LIMIT 1", (user.id,))
-		if sqlObj and sqlObj['username'] == user.username:
-			return
-		self.conn.execute("INSERT INTO `username_history` (`user_id`, `username`) VALUE (%s, %s)", (user.id, user.username))
-		self.conn.commit()
-
-	def real_user_index(self, users: list):
-		for x in users:
-			self._real_user_index(x)
-		self.conn.commit()
-
-	def _real_user_index(self, user: User or Chat, *, enable_request: bool = False):
-		self.insert_username(user)
-		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user.id)
-		profileObj = user_profile(user)
-		if sqlObj is None:
-			is_bot = isinstance(user, User) and user.is_bot
-			is_group = user.id < 0
-			self.conn.execute(
-				"INSERT INTO `user_index` (`user_id`, `first_name`, `last_name`, `photo_id`, `hash`, `is_bot`, `is_group`) VALUE (%s, %s, %s, %s, %s, %s, %s)",
-				(
-					profileObj.user_id,
-					profileObj.first_name,
-					profileObj.last_name,
-					profileObj.photo_id,
-					profileObj.hash,
-					'Y' if is_bot else 'N',
-					'Y' if is_group else 'N'
-				)
-			)
-			self.conn.execute(*profileObj.sql_insert)
-			return True
-		elif profileObj.hash != sqlObj['hash']:
-			self.conn.execute(
-				"UPDATE `user_index` SET `first_name` = %s, `last_name` = %s, `photo_id` = %s, `hash` = %s, `timestamp` = CURRENT_TIMESTAMP() WHERE `user_id` = %s",
-				(
-					profileObj.first_name,
-					profileObj.last_name,
-					profileObj.photo_id,
-					profileObj.hash,
-					profileObj.user_id,
-				)
-			)
-			self.conn.execute(*profileObj.sql_insert)
-			return True
-		elif enable_request and (datetime.datetime.now() - sqlObj['last_refresh']).total_seconds() > 3600:
-			if isinstance(user, User):
-				u = self.client.get_users([user.id,])[0]
-			else:
-				u = self.client.get_chat(user.id)
-			self.conn.execute('UPDATE `user_index` SET `last_refresh` = CURRENT_TIMESTAMP() WHERE `user_id` = %s', user.id)
-			return self._real_user_index(u)
-		return False
-
 	def close(self):
 		if self._init:
 			self.conn.close()
-	
+
 	def handle_disconnect(self, _client: Client):
 		if self._init:
 			self.conn.close()
+		self.logger.debug('Disconnecting...')
 
 if __name__ == "__main__":
-	history_index_class().start()
+	history_index_class(other_client = True).start()

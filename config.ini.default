@@ -1,0 +1,16 @@
+[account]
+api_id =
+api_hash =
+owner =
+indexbot_token =
+cache_channel =
+
+[mysql]
+host =
+username =
+passwd =
+history_db =
+
+[filters]
+chat =
+user =
