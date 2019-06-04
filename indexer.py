@@ -82,7 +82,9 @@ class history_index_class(object):
 		self.trackers = task.msg_tracker_thread_class(
 			self.client,
 			self.conn,
-			self.check_filter
+			self.check_filter,
+			notify = task.notify_class(self.other_client, self.owner),
+			other_client = self.other_client
 		)
 		self.trackers.start()
 

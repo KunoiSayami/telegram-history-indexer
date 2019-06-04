@@ -17,21 +17,25 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
-from pyrogram import Dialogs, api
+from pyrogram import Dialogs
 import pyrogram.errors
 import threading
 import traceback
 import time
-import warnings
-from datetime import datetime
+from datetime import datetime, timezone
+import logging
 
 class iter_user_messages(threading.Thread):
 	def __init__(self, indexer):
 		threading.Thread.__init__(self, daemon = True)
+
+		self.logger = logging.getLogger(__name__)
+		self.logger.setLevel(logging.DEBUG)
+
 		self.client = indexer.client
 		self.conn = indexer.conn
 		self.indexer = indexer
-		self.end_time = time.time() - 1800
+		self.end_time = 0
 
 	def run(self):
 		self.get_dialogs()
@@ -40,7 +44,7 @@ class iter_user_messages(threading.Thread):
 	def _indenify_user(self, users: list):
 		userinfos = self.client.get_users(users)
 		for x in userinfos:
-			self.indexer.user_profile_track(x)
+			self.indexer.trackers.user_queue.put_nowait(x)
 		self.conn.commit()
 
 	def indenify_user(self):
@@ -65,16 +69,13 @@ class iter_user_messages(threading.Thread):
 				offset_date = dialogs.dialogs[-1].top_message.date - 1
 				sqlObj = self.conn.query1("SELECT `last_message_id`, `indexed` FROM `indexed_dialogs` WHERE `user_id` = -1")
 			except pyrogram.errors.FloodWait as e:
-				warnings.warn(
-					'Caughted Flood wait, wait {} seconds'.format(e.x),
-					RuntimeWarning
-				)
+				self.logger.warning('Caughted Flood wait, wait %d seconds', e.x)
 				time.sleep(e.x)
 			except IndexError:
 				break
 		if switch:
 			self.indenify_user()
-		print('Search over')
+		self.logger.debug('Search over')
 
 	def process_dialogs(self, dialogs: Dialogs, sqlObj: dict or None):
 		for dialog in dialogs.dialogs:
@@ -118,10 +119,7 @@ class iter_user_messages(threading.Thread):
 					msg_his = self.client.get_history(user_id, offset_id = offset_id)
 					break
 				except pyrogram.errors.FloodWait as e:
-					warnings.warn(
-						'got FloodWait, wait {} seconds'.format(e.x),
-						RuntimeWarning
-					)
+					self.logger.warning('got FloodWait, wait %d seconds', e.x)
 					time.sleep(e.x)
 			if self.__process_messages(msg_his.messages, force_check):
 				break
@@ -132,17 +130,29 @@ class iter_user_messages(threading.Thread):
 			time.sleep(3)
 
 	def __process_messages(self, msg_group: list, force_check: bool = False):
-		with self.indexer._lock_msg:
-			for x in msg_group:
-				self.indexer._insert_msg(x, force_check)
-				if x.date < self.end_time:
-					return True
+		for x in msg_group:
+			if force_check: x.edit_date = 0
+			self.indexer.trackers.msg_queue.put_nowait(x)
+			if x.date < self.end_time:
+				return True
 		return
 
 	def recheck(self, force_check: bool = False):
 		sqlObj = self.conn.query1("SELECT `timestamp` FROM `index` ORDER BY `timestamp` DESC LIMIT 1")
 		if force_check or (sqlObj and (datetime.now() - sqlObj['timestamp']).total_seconds() > 60 * 30):
+			if isinstance(self.end_time, int) and self.end_time == 0:
+				self.end_time = sqlObj['timestamp'].replace(tzinfo=timezone.utc).timestamp()
+			if isinstance(self.end_time, datetime):
+				self.end_time = self.end_time.replace(tzinfo=timezone.utc).timestamp()
+
+			self.logger.info('Calling recheck function')
+			self.logger.debug('Endtime is %d', self.end_time)
+
 			threading.Thread(target = self._recheck, daemon = True).start()
+
+			self.logger.debug('Recheck function start successful')
+		else:
+			self.logger.info('Nothing to recheck')
 
 	def _recheck(self):
 		while not self.client.is_started: time.sleep(0.01)
@@ -157,13 +167,11 @@ class iter_user_messages(threading.Thread):
 					chats.append((x.chat.id, x.top_message.message_id))
 				offset_date = dialogs.dialogs[-1].top_message.date - 1
 			except pyrogram.errors.FloodWait as e:
-				warnings.warn(
-					f'Caughted Flood wait, wait {e.x} seconds',
-					RuntimeWarning
-				)
+				self.logger.warning('Caughted Flood wait, wait %d seconds', e.x)
 				time.sleep(e.x)
 			except IndexError:
 				break
-		print(chats)
+		self.logger.info('Find %d chats', len(chats))
+		self.logger.debug('chats (%s)', repr(chats))
 		for x in chats:
 			self._process_messages(x[0], x[1], force_check = True)

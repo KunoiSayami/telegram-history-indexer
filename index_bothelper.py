@@ -31,6 +31,7 @@ import re
 import opencc
 import itertools
 from type_user import hashable_user as user
+import task
 
 class bot_search_helper(object):
 	STEP = re.compile(r'Page: (\d+) / \d+')
@@ -99,6 +100,7 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_get_document, Filters.private & Filters.user(self.owner) & Filters.command('get')))
 		self.bot.add_handler(MessageHandler(self.handle_insert_cache, Filters.private & Filters.user(self.owner) & Filters.photo & Filters.command('cache')))
 		self.bot.add_handler(MessageHandler(self.handle_incoming_image, Filters.media & Filters.chat(self.cache_channel)))
+		self.bot.add_handler(MessageHandler(self.query_mapping_lists, Filters.private & Filters.user(self.owner) & Filters.command('qc')))
 		self.bot.add_handler(MessageHandler(self.handle_query_media, Filters.private & Filters.user(self.owner) & Filters.command('qm')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
 		self.bot.add_handler(DisconnectHandler(self.handle_disconnect))
@@ -106,9 +108,10 @@ class bot_search_helper(object):
 		self.initialize_setting()
 		self.bot.start()
 
-	def handle_close_keyboard(self, client: Client, msg: Message):
+	def handle_close_keyboard(self, _client: Client, msg: Message):
 		if msg.reply_to_message.from_user.is_self:
-			client.edit_message_reply_markup(msg.chat.id, msg.reply_to_message.message_id)
+			msg.delete()
+			msg.reply_to_message.edit_reply_markup()
 		else:
 			msg.reply('Oops! Something wrong!', True)
 
@@ -231,27 +234,26 @@ class bot_search_helper(object):
 
 	def send_photo(self, client: Client, msg: Message, sqlObj: dict):
 		with self.search_lock:
-			_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `avatar_id` = %s", (sqlObj['photo_id'],))
+			_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `id` = %s", (sqlObj['photo_id'],))
 			if _sqlObj:
 				client.send_photo(msg.chat.id, _sqlObj['file_id'], self.generate_user_info(sqlObj), 'html')
 			else:
 				client.download_media(sqlObj['photo_id'], 'user.jpg')
 				_msg = client.send_photo(msg.chat.id, './downloads/user.jpg', self.generate_user_info(sqlObj), 'html')
 				self.conn.execute(
-					"INSERT INTO `media_cache` (`avatar_id`, `file_id`) VALUE (%s, %s)",
+					"INSERT INTO `media_cache` (`id`, `file_id`) VALUE (%s, %s)",
 					(sqlObj['photo_id'], _msg.photo.sizes[-1].file_id)
 				)
 				os.remove('./downloads/user.jpg')
 
 	def _insert_cache(self, file_id: str, bot_file_id: str):
-		_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `avatar_id` = %s", (file_id,))
+		_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `id` = %s", (file_id,))
 		if _sqlObj is None:
 			if bot_file_id != '':
 				self.conn.execute(
-					"INSERT INTO `media_cache` (`avatar_id`, `file_id`) VALUE (%s, %s)",
+					"INSERT INTO `media_cache` (`id`, `file_id`) VALUE (%s, %s)",
 					(file_id, bot_file_id)
 				)
-				print(file_id, bot_file_id)
 		else:
 			return _sqlObj
 
@@ -313,29 +315,19 @@ class bot_search_helper(object):
 		else:
 			client.send_cached_media(msg.chat.id, sqlObj['file_id'], f'`{msg.command[1]}`')
 
-	@staticmethod
-	def get_msg_type(msg: Message):
-		return 'photo' if msg.photo else \
-			'video' if msg.video else \
-			'animation' if msg.animation else \
-			'document' if msg.document else \
-			'text' if msg.text else \
-			'voice' if msg.voice else'error'
-
-	@staticmethod
-	def get_file_id(msg: Message, _type: str):
-		if _type == 'photo':
-			return msg.photo.sizes[-1].file_id
-		else:
-			return getattr(msg, _type).file_id
-
 	def handle_incoming_image(self, _client: Client, msg: Message):
 		msg.delete()
-		self._insert_cache(msg.caption, self.get_file_id(msg, self.get_msg_type(msg)))
+		self._insert_cache(
+			msg.caption,
+			task.msg_tracker_thread_class.get_file_id(
+				msg,
+				task.msg_tracker_thread_class.get_msg_type(msg)
+			)
+		)
 
 	def handle_insert_cache(self, client: Client, msg: Message):
 		msg.delete()
-		file_id = self.get_file_id(msg, self.get_msg_type(msg))
+		file_id = msg, task.msg_tracker_thread_class.get_file_id(msg, task.msg_tracker_thread_class.get_msg_type(msg))
 		self._insert_cache(msg.command[1], file_id)
 		client.send_cached_media(msg.chat.id, file_id, f'`{msg.command[1]}`')
 		client.send_chat_action(msg.chat.id, 'cancel')
@@ -388,8 +380,17 @@ class bot_search_helper(object):
 			), max_count
 		return '404 Not found', 0
 
+	def query_mapping_lists(self, _: Client, msg: Message):
+		count = self.conn.query1("SELECT COUNT(*) AS `count` FROM `pending_mapping`")['count']
+		if count:
+			msg.reply(f'Total number of media file(s): {count}', True, reply_markup = InlineKeyboardMarkup( inline_keyboard = [
+				[InlineKeyboardButton( text = 'Force Request', callback_data = 'magic fc mapping')]
+			]))
+		else:
+			msg.reply('Table is empty', True)
+
 	def handle_query_media(self, _client: Client, msg: Message):
-		if len(msg.command) > 1 and msg.command[1] not in ('document','photo','video','animation','voice'):
+		if len(msg.command) > 1 and msg.command[1] not in ('document', 'photo', 'video', 'animation', 'voice'):
 			return msg.reply('Please use `/qm [<type> [<keyword1> <keyword2> ...]]` to query media file')
 
 		args = msg.command[2:]
@@ -580,6 +581,12 @@ class bot_search_helper(object):
 				msg.message.reply(f'/MagicForward {datagroup[2]} {datagroup[3]}')
 			elif datagroup[1] == 'get':
 				self._handle_accurate_search_user(client, msg.message, datagroup[1:])
+
+		elif datagroup[0] == 'magic':
+			if datagroup[1] == 'fc':
+				if datagroup[2] == 'mapping':
+					msg.message.edit_reply_markup()
+					msg.message.reply('/MagicForceMapping', False)
 
 		msg.answer()
 

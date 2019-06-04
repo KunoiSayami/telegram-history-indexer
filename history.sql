@@ -45,9 +45,9 @@ CREATE TABLE IF NOT EXISTS `indexed_dialogs` (
 -- Dumping structure for table media_cache
 DROP TABLE IF EXISTS `media_cache`;
 CREATE TABLE IF NOT EXISTS `media_cache` (
-  `avatar_id` varchar(64) COLLATE utf8_unicode_ci NOT NULL,
+  `id` varchar(64) COLLATE utf8_unicode_ci NOT NULL,
   `file_id` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
-  PRIMARY KEY (`avatar_id`)
+  PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 
 -- Dumping structure for table query_history

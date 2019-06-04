@@ -23,16 +23,38 @@ from threading import Thread
 from pyrogram import Client, Message, User, Chat
 import time
 import datetime
+import traceback
 import threading
 from type_user import user_profile
 import logging
 
-class msg_tracker_thread_class(Thread):
-	def __init__(self, client: Client, conn: mysqldb, filter_func: 'callable', *, other_client: Client = None):
-		Thread.__init__(self, daemon = True)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
 
-		self.logger = logging.getLogger(__name__)
-		self.logger.setLevel(logging.WARNING)
+class fake_notify_class(object):
+	def send(self):
+		pass
+
+class notify_class(object):
+	def __init__(self, client: Client, target: int, interval: int = 60):
+		self.client = client
+		self.target = target
+		self.interval = interval
+		self.last_send = time.time()
+	def send(self, msg: str):
+		if time.time() - self.last_send < self.interval:
+			return False
+		try:
+			self.client.send_message(self.target, f'```{msg}```')
+		except:
+			traceback.print_exc()
+		finally:
+			self.last_send = time.time()
+		return True
+
+class msg_tracker_thread_class(Thread):
+	def __init__(self, client: Client, conn: mysqldb, filter_func: 'callable', *, notify: notify_class = None, other_client: Client = None):
+		Thread.__init__(self, daemon = True)
 
 		self.msg_queue = Queue()
 		self.user_queue = Queue()
@@ -42,15 +64,18 @@ class msg_tracker_thread_class(Thread):
 		self.filter_func = filter_func
 		if self.other_client is None:
 			self.other_client = self.client
+		self.notify = notify
+		if self.notify is None:
+			self.notify = fake_notify_class()
 
 	def start(self):
-		self.logger.debug('Starting `msg_tracker_thread_class\'')
+		logger.debug('Starting `msg_tracker_thread_class\'')
 		Thread(target = self.user_tracker, daemon = True).start()
 		threading.Thread.start(self)
-		self.logger.debug('Start `msg_tracker_thread_class\' successful')
+		logger.debug('Start `msg_tracker_thread_class\' successful')
 
 	def run(self):
-		self.logger.debug('`msg_tracker_thread\' started!')
+		logger.debug('`msg_tracker_thread\' started!')
 		while not self.client.is_started: time.sleep(0.5)
 		while True:
 			while self.msg_queue.empty():
@@ -106,16 +131,20 @@ class msg_tracker_thread_class(Thread):
 						self.get_file_id(msg, _type)
 				)
 			)
-		self.logger.debug('INSERT INTO `index` %d %d %s', msg.chat.id, msg.message_id, text)
+		logger.debug('INSERT INTO `index` %d %d %s', msg.chat.id, msg.message_id, text)
 
 	def filter_msg(self):
 		while not self.msg_queue.empty():
 			msg = self.msg_queue.get_nowait()
 			if self.filter_func(msg): continue
-			self._filter_msg(msg)
+			try:
+				self._filter_msg(msg)
+			except:
+				self.notify.send(traceback.format_exc())
+				traceback.print_exc()
 
 	def user_tracker(self):
-		self.logger.debug('`user_tracker\' started!')
+		logger.debug('`user_tracker\' started!')
 		while not self.client.is_started: time.sleep(0.5)
 		while True:
 			while self.user_queue.empty():
