@@ -32,6 +32,9 @@ import opencc
 import itertools
 from type_user import hashable_user as user
 import task
+import logging
+
+logger = logging.getLogger('index_bothelper')
 
 class user_cache_thread(threading.Thread):
 
@@ -41,6 +44,7 @@ class user_cache_thread(threading.Thread):
 		self._cache_dict = {}
 
 	def run(self):
+		logger.info('user_cache_thread start successful')
 		while True:
 			pending_remove = []
 			if len(self._cache_dict) > 0:
@@ -158,6 +162,7 @@ class bot_search_helper(object):
 		self.user_cache.start()
 		self.initialize_setting()
 		self.bot.start()
+		logger.info('Bot started succesful')
 
 	def handle_close_keyboard(self, _client: Client, msg: Message):
 		if msg.reply_to_message.from_user.is_self:
@@ -310,6 +315,7 @@ class bot_search_helper(object):
 					"INSERT INTO `media_cache` (`id`, `file_id`) VALUE (%s, %s)",
 					(file_id, bot_file_id)
 				)
+				print(file_id, bot_file_id)
 		else:
 			return _sqlObj
 
@@ -350,16 +356,22 @@ class bot_search_helper(object):
 		args = list(set([cct2s.convert(x) for x in args]))
 		args.sort()
 
+		update_request = False
+
 		search_check = self.check_duplicate_msg_history_search_request(args)
 		if search_check is None:
+			update_request = True
 			search_check = self.insert_msg_search_history(args)
 		search_id, timestamp = search_check['_id'], search_check['timestamp']
 
-		text, max_count = self.query_history(args, timestamp = timestamp)
-		if max_count:
+		text, max_count = self.query_history(args, max_count = None if update_request else search_check['max_count'], timestamp = timestamp)
+		if text != '404 Not found':
 			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count))
 		else:
 			msg.reply(text, True)
+
+		if max_count != search_check['max_count']:
+			self.update_max_count(search_id, max_count)
 
 	def handle_get_document(self, client: Client, msg: Message):
 		if len(msg.command) == 1:
@@ -413,7 +425,7 @@ class bot_search_helper(object):
 			optionsStr = '1 = 1'
 		return optionsStr
 
-	def query_history(self, args: list, step: int = 0, timestamp: str or "datetime.datetime" = '', *, callback: "callable" = None, table: str = 'index', _type: str = ''):
+	def query_history(self, args: list, step: int = 0, timestamp: str or "datetime.datetime" = '', *, max_count: int = None, callback: "callable" = None, table: str = 'index', _type: str = ''):
 		'''need passing origin args to this function'''
 		args, sqlStr = self.generate_args(args, _type)
 
@@ -423,9 +435,10 @@ class bot_search_helper(object):
 
 		optionsStr = self.generate_options(sqlStr, timestamp)
 
-		max_count = self.conn.query1(f"SELECT COUNT(*) AS `count` FROM `{table}` WHERE {optionsStr}", args)['count']
-		if max_count:
-			sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {step}, {self.page_limit}", args)
+		if max_count is None:
+			max_count = self.conn.query1(f"SELECT COUNT(*) AS `count` FROM `{table}` WHERE {optionsStr}", args)['count']
+		sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {step}, {self.page_limit}", args)
+		if len(sqlObj):
 			if callback: return callback(sqlObj)
 			return '{3}\n\nPage: {0} / {1}\nLast query: <code>{2}</code>'.format(
 				(step // self.page_limit) + 1,
@@ -452,18 +465,24 @@ class bot_search_helper(object):
 		args = msg.command[2:]
 		_type = msg.command[1] if len(msg.command) > 1 else None
 
+		update_request = False
+
 		if len(repr(args)) > 128:
 			return msg.reply('Query option too long!')
 		search_check = self.check_duplicate_msg_history_query_request(_type, args)
 		if search_check is None:
+			update_request = True
 			search_check = self.insert_msg_query_history(_type, args)
 		search_id, timestamp = search_check['_id'], search_check['timestamp']
 
-		text, max_count = self.query_history(args, 0, timestamp, table = 'document_index', _type = _type)
-		if max_count:
+		text, max_count = self.query_history(args, 0, timestamp, max_count = None if update_request else search_check['max_count'], table = 'document_index', _type = _type)
+		if text != '404 Not found':
 			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count, head = 'doc'))
 		else:
 			msg.reply(text, True)
+
+		if max_count != search_check['max_count']:
+			self.update_max_count(search_id, max_count)
 
 	def generate_select_keyboard(self, sqlObj: dict):
 		if len(sqlObj) == 0: return None
@@ -482,7 +501,7 @@ class bot_search_helper(object):
 		if sqlObj is None:
 			return msg.reply('404 Search index not found')
 		step = self.STEP.search(msg.reply_to_message.text).group(1)
-		kb = self.query_history(eval(sqlObj['args']), (int(step) - 1) * self.page_limit, sqlObj['timestamp'], callback = self.generate_select_keyboard)
+		kb = self.query_history(eval(sqlObj['args']), (int(step) - 1) * self.page_limit, sqlObj['timestamp'], max_count = sqlObj['max_count'], callback = self.generate_select_keyboard)
 		if isinstance(kb, tuple): return
 		msg.reply('Please select a message:', True, reply_markup = kb)
 
@@ -582,16 +601,18 @@ class bot_search_helper(object):
 					self.conn.execute(f"UPDATE `{'search' if datagroup[0] == 'msg' else 'query'}_history` SET `timestamp` = %s WHERE `_id` = %s", (timestr, datagroup[2]))
 					sqlObj['timestamp'] = timestr
 				step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
-				text, max_index = self.query_history(args, step, sqlObj['timestamp'], **queryArg)
-				if datagroup[1] != 'r':
-					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]), **keyboardArg)
-				else:
+				text, max_index = self.query_history(args, step, sqlObj['timestamp'], max_count = None if datagroup[1] == 'r' else sqlObj['max_count'], **queryArg)
+				if datagroup[1] == 'r':
 					reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index, **keyboardArg)
+				else:
+					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]), **keyboardArg)
 				msg.message.edit(
 					text,
 					parse_mode = 'html',
 					reply_markup = reply_markup
 				)
+				if datagroup[1] == 'r':
+					self.update_max_count(datagroup[2], max_index, len(queryArg))
 
 		elif datagroup[0] == 'set':
 
@@ -685,24 +706,27 @@ class bot_search_helper(object):
 	def insert_msg_search_history(self, args: list):
 		with self.db_search_lock:
 			self.conn.execute("INSERT INTO `search_history` (`args`, `hash`) VALUE (%s, %s)", (repr(args), self.get_msg_search_hash(args)))
-			return self.conn.query1("SELECT `_id`, `timestamp` FROM `search_history` ORDER BY `_id` DESC LIMIT 1")
+			return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `search_history` ORDER BY `_id` DESC LIMIT 1")
 
 	def check_duplicate_msg_history_search_request(self, args: list):
-		return self.conn.query1("SELECT `_id`, `timestamp` FROM `search_history` WHERE `hash` = %s", self.get_msg_search_hash(args))
+		return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `search_history` WHERE `hash` = %s", self.get_msg_search_hash(args))
 
 	def get_msg_history(self, _id: int, table: str = 'search'):
 		if table == 'search':
-			return self.conn.query1(f"SELECT `args`, `timestamp` FROM `{table}_history` WHERE `_id` = %s", (_id,))
+			return self.conn.query1(f"SELECT `args`, `timestamp`, `max_count` FROM `{table}_history` WHERE `_id` = %s", (_id,))
 		else:
-			return self.conn.query1(f"SELECT `args`, `type`, `timestamp` FROM `{table}_history` WHERE `_id` = %s", (_id,))
+			return self.conn.query1(f"SELECT `args`, `type`, `timestamp`, `max_count` FROM `{table}_history` WHERE `_id` = %s", (_id,))
 
 	def insert_msg_query_history(self, _type: str, args: list):
 		with self.db_query_lock:
 			self.conn.execute("INSERT INTO `query_history` (`type`, `args`, `hash`) VALUE (%s, %s, %s)", (_type, repr(args), self.get_msg_query_hash(_type, args)))
-			return self.conn.query1("SELECT `_id`, `timestamp` FROM `query_history` ORDER BY `_id` DESC LIMIT 1")
+			return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `query_history` ORDER BY `_id` DESC LIMIT 1")
 
 	def check_duplicate_msg_history_query_request(self, _type: str, args: list):
-		return self.conn.query1("SELECT `_id`, `timestamp` FROM `query_history` WHERE `hash` = %s", self.get_msg_query_hash(_type, args))
+		return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `query_history` WHERE `hash` = %s", self.get_msg_query_hash(_type, args))
+
+	def update_max_count(self, _id: int, max_count: int, doc: bool = False):
+		self.conn.execute(f"UPDATE `{'query' if doc else 'search'}_history` SET `max_count` = %s WHERE `_id` = %s", (max_count, _id))
 
 	@staticmethod
 	def get_msg_search_hash(args: list):
