@@ -57,21 +57,18 @@ class user_cache_thread(threading.Thread):
 			time.sleep(60)
 
 	def get(self, user_id: int):
-		try:
-			return self._get(user_id)
-		except:
-			return self._get(user_id)
+		return self._get(user_id)
 
 	def _get(self, user_id: int):
 		if user_id not in self._cache_dict:
 			sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user_id)
 			if sqlObj is not None:
-				self._cache_dict.update({user_id: {'full_name': user(**sqlObj).full_name , 'timestamp': time.time()}})
+				self._cache_dict.update({user_id: {'full_name': user(**sqlObj).full_name , 'timestamp': time.time()}}) 
 			else:
 				return user_id
 		else:
 			self._cache_dict[user_id]['timestamp'] = time.time()
-			return '{1}</code> (<code>{0}'.format(user_id, self._cache_dict[user_id]['full_name'])
+		return '{1}</code> (<code>{0}'.format(user_id, self._cache_dict[user_id]['full_name'])
 
 
 class bot_search_helper(object):
@@ -260,21 +257,21 @@ class bot_search_helper(object):
 	def generate_settings_keyboard(self):
 		return InlineKeyboardMarkup( inline_keyboard = [
 			[
-				InlineKeyboardButton(text = 'Show Detail', callback_data = b'set detail toggle')
+				InlineKeyboardButton(text = 'Show Detail', callback_data = 'set detail toggle')
 			],
 			[
-				InlineKeyboardButton(text = 'Force query', callback_data = b'set force toggle'),
-				InlineKeyboardButton(text = 'User only', callback_data = b'set only user'),
-				InlineKeyboardButton(text = 'Group only', callback_data = b'set only group')
+				InlineKeyboardButton(text = 'Force query', callback_data = 'set force toggle'),
+				InlineKeyboardButton(text = 'User only', callback_data = 'set only user'),
+				InlineKeyboardButton(text = 'Group only', callback_data = 'set only group')
 			],
 			[
-				InlineKeyboardButton(text = 'Use specify id', callback_data = b'set specify toggle'),
-				InlineKeyboardButton(text = 'Specify chat', callback_data = b'set specify chat'),
-				InlineKeyboardButton(text = 'Reset id', callback_data = b'set id reset')
+				InlineKeyboardButton(text = 'Use specify id', callback_data = 'set specify toggle'),
+				InlineKeyboardButton(text = 'Specify chat', callback_data = 'set specify chat'),
+				InlineKeyboardButton(text = 'Reset id', callback_data = 'set id reset')
 			],
 			[
-				InlineKeyboardButton(text = 'Reset', callback_data = b'set reset'),
-				InlineKeyboardButton(text = 'Refresh', callback_data = b'set refresh')
+				InlineKeyboardButton(text = 'Reset', callback_data = 'set reset'),
+				InlineKeyboardButton(text = 'Refresh', callback_data = 'set refresh')
 			]
 		])
 
@@ -558,9 +555,9 @@ class bot_search_helper(object):
 			d['detail_switch'] = ''
 			return d
 		chat_id, from_user, forward_from = d['chat_id'], d['from_user'], d['forward_from']
-		d['chat_id'] = self.parse_user_info(chat_id)
-		d['from_user'] = self.parse_user_info(from_user)
-		d['forward_from'] = self.parse_user_info(forward_from)
+		d['chat_id'] = self.user_cache.get(chat_id)
+		d['from_user'] = self.user_cache.get(from_user)
+		d['forward_from'] = self.user_cache.get(forward_from)
 		d['detail_switch'] = ')'
 		return d
 
