@@ -42,7 +42,7 @@ class history_index_class(object):
 
 		self.other_client = other_client
 
-		self.owner = config['account']['owner']
+		self.owner = int(config['account']['owner'])
 
 		if client is None:
 			self.client = Client(

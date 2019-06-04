@@ -33,6 +33,43 @@ import itertools
 from type_user import hashable_user as user
 import task
 
+class user_cache_thread(threading.Thread):
+
+	def __init__(self, conn: mysqldb):
+		threading.Thread.__init__(self, daemon = True)
+		self.conn = conn
+		self._cache_dict = {}
+
+	def run(self):
+		while True:
+			pending_remove = []
+			if len(self._cache_dict) > 0:
+				ct = time.time()
+				for key, item in self._cache_dict.items():
+					if ct - item['timestamp'] > 1800:
+						pending_remove.append(key)
+			for x in pending_remove:
+				self._cache_dict.pop(x)
+			time.sleep(60)
+
+	def get(self, user_id: int):
+		try:
+			return self._get(user_id)
+		except:
+			return self._get(user_id)
+
+	def _get(self, user_id: int):
+		if user_id not in self._cache_dict:
+			sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user_id)
+			if sqlObj is not None:
+				self._cache_dict.update({user_id: {'full_name': user(**sqlObj).full_name , 'timestamp': time.time()}})
+			else:
+				return user_id
+		else:
+			self._cache_dict[user_id]['timestamp'] = time.time()
+			return '{1}</code> (<code>{0}'.format(user_id, self._cache_dict[user_id]['full_name'])
+
+
 class bot_search_helper(object):
 	STEP = re.compile(r'Page: (\d+) / \d+')
 
@@ -49,6 +86,7 @@ class bot_search_helper(object):
 		self.show_info_detail = None
 
 		self.owner = owner_id
+		self.bot_id = 0
 		self.cache_channel = 0
 
 		if isinstance(bot_instance, Client):
@@ -62,6 +100,7 @@ class bot_search_helper(object):
 				api_hash = config['account']['api_hash'],
 				api_id = config['account']['api_id']
 			)
+			self.bot_id = int((bot_instance if bot_instance != '' else config['account']['indexbot_token']).split(':')[0])
 			self.owner = int(config['account']['owner'])
 			self.cache_channel = int(config['account']['cache_channel'])
 
@@ -90,7 +129,14 @@ class bot_search_helper(object):
 		self.db_search_lock = threading.Lock()
 		self.search_lock = threading.Lock()
 
+		self.user_cache = user_cache_thread(self.conn)
+
 		self.bot.add_handler(MessageHandler(self.handle_forward, Filters.private & Filters.user(self.owner) & Filters.forwarded), -1)
+
+		# MessageHandler For groups
+		self.bot.add_handler(MessageHandler(self.handle_join_group, Filters.new_chat_members))
+
+		# MessageHandler For query
 		self.bot.add_handler(MessageHandler(self.handle_search_user, Filters.private & Filters.user(self.owner) & Filters.command('su')))
 		self.bot.add_handler(MessageHandler(self.handle_search_message_history, Filters.private & Filters.user(self.owner) & Filters.command('sm')))
 		self.bot.add_handler(MessageHandler(self.handle_accurate_search_user, Filters.private & Filters.user(self.owner) & Filters.command('ua')))
@@ -99,12 +145,17 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_select_message, Filters.private & Filters.user(self.owner) & Filters.command('select')))
 		self.bot.add_handler(MessageHandler(self.handle_get_document, Filters.private & Filters.user(self.owner) & Filters.command('get')))
 		self.bot.add_handler(MessageHandler(self.handle_insert_cache, Filters.private & Filters.user(self.owner) & Filters.photo & Filters.command('cache')))
-		self.bot.add_handler(MessageHandler(self.handle_incoming_image, Filters.media & Filters.chat(self.cache_channel)))
-		self.bot.add_handler(MessageHandler(self.query_mapping_lists, Filters.private & Filters.user(self.owner) & Filters.command('qc')))
-		self.bot.add_handler(MessageHandler(self.handle_query_media, Filters.private & Filters.user(self.owner) & Filters.command('qm')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
+
+		# MessageHandler For media
+		self.bot.add_handler(MessageHandler(self.handle_incoming_image, Filters.media & Filters.chat(self.cache_channel)))
+		self.bot.add_handler(MessageHandler(self.handle_query_media, Filters.private & Filters.user(self.owner) & Filters.command('qm')))
+		self.bot.add_handler(MessageHandler(self.query_mapping_lists, Filters.private & Filters.user(self.owner) & Filters.command('qc')))
+
 		self.bot.add_handler(DisconnectHandler(self.handle_disconnect))
 
+	def start(self):
+		self.user_cache.start()
 		self.initialize_setting()
 		self.bot.start()
 
@@ -114,6 +165,11 @@ class bot_search_helper(object):
 			msg.reply_to_message.edit_reply_markup()
 		else:
 			msg.reply('Oops! Something wrong!', True)
+
+	def handle_join_group(self, client: Client, msg: Message):
+		if any(x.id == self.bot_id for x in msg.new_chat_members) and msg.from_user.id != self.owner:
+			client.leave_chat(msg.chat.id)
+			print(f'Left chat {msg.chat.title}({msg.chat.id})')
 
 	def handle_setting(self, _client: Client, msg: Message):
 		msggroup = msg.text.split()
@@ -371,7 +427,7 @@ class bot_search_helper(object):
 		if max_count:
 			sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {step}, {self.page_limit}", args)
 			if callback: return callback(sqlObj)
-			return '{3}\n\nPage: {0} / {1}\nLast_query: <code>{2}</code>'.format(
+			return '{3}\n\nPage: {0} / {1}\nLast query: <code>{2}</code>'.format(
 				(step // self.page_limit) + 1,
 				# From: https://www.geeksforgeeks.org/g-fact-35-truncate-in-python/
 				math.ceil(max_count / self.page_limit),
@@ -456,7 +512,7 @@ class bot_search_helper(object):
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
 		if d['text'] and len(d['text']) > 750: # prevert message too long
 			d['text'] = d['text'][:750] + '...'
-		d['forward_info'] = '<b>Forward From</b>: <code>{}</code>{detail_switch}\n'.format(d['forward_from']) if d['forward_from'] else ''
+		d['forward_info'] = '<b>Forward From</b>: <code>{forward_from}</code>{detail_switch}\n'.format(**d) if d['forward_from'] else ''
 		d['text_info'] = '<b>Text</b>:\n<pre>{}</pre>\n'.format(d['text']) if d['text'] else ''
 		d['media_info'] = '<b>File type</b>: <code>{0}</code>\n<b>File id</b>: <code>{1}</code>\n'.format(d['type'], d['file_id']) if 'type' in d else ''
 
@@ -576,7 +632,7 @@ class bot_search_helper(object):
 		elif datagroup[0] == 'select':
 			if datagroup[1] == 'detail':
 				sqlObj = self.conn.query1("SELECT * FROM `index` WHERE `_id` = %s", datagroup[2])
-				msg.message.edit(self.generate_detail_msg(sqlObj), 'html', reply_markup = self.generate_detail_keyboard(sqlObj))
+				msg.message.edit(reply_markup = self.generate_detail_keyboard(sqlObj), text = self.generate_detail_msg(sqlObj),  parse_mode = 'html')
 			elif datagroup[1] == 'fwd':
 				msg.message.reply(f'/MagicForward {datagroup[2]} {datagroup[3]}')
 			elif datagroup[1] == 'get':
@@ -680,4 +736,5 @@ class bot_search_helper(object):
 
 if __name__ == "__main__":
 	b = bot_search_helper()
+	b.start()
 	b.bot.idle()
