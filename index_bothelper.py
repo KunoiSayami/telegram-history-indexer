@@ -129,6 +129,7 @@ class bot_search_helper(object):
 		self.db_query_lock = threading.Lock()
 		self.db_search_lock = threading.Lock()
 		self.search_lock = threading.Lock()
+		self.update_lock = threading.Lock()
 
 		self.user_cache = user_cache_thread(self.conn)
 
@@ -562,12 +563,41 @@ class bot_search_helper(object):
 		return d
 
 	def generate_detail_msg(self, sqlObj: dict):
+		logger.debug('Calling `generate_detail_msg\'')
 		userObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['from_user'],))
 		r = self.generate_user_info(userObj)
 		if sqlObj['chat_id'] != sqlObj['from_user']:
 			chatObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['chat_id'],))
 			r += f'\nChat:{self.generate_user_info(chatObj)}'
 		return f'Message Details:\nFrom User:\n{r}\n\n{self.show_query_msg_result(sqlObj)}'
+
+	def handle_page_select(self, datagroup: list, msg: CallbackQuery):
+		if datagroup[1] in ('n', 'b', 'r'):
+			sqlObj = self.get_msg_history(datagroup[2], 'query' if datagroup[0] == 'doc' else 'search')
+			if datagroup[0] == 'doc':
+				_type = sqlObj.pop('type')
+				queryArg = dict(table = 'document_index', _type = _type)
+				keyboardArg = dict(head = 'doc')
+			else:
+				queryArg, keyboardArg = {}, {}
+			args = eval(sqlObj['args'])
+			if datagroup[1] == 'r':
+				timestr = time.strftime('%Y-%m-%d %H:%M:%S')
+				self.conn.execute(f"UPDATE `{'search' if datagroup[0] == 'msg' else 'query'}_history` SET `timestamp` = %s WHERE `_id` = %s", (timestr, datagroup[2]))
+				sqlObj['timestamp'] = timestr
+			step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
+			text, max_index = self.query_history(args, step, sqlObj['timestamp'], max_count = None if datagroup[1] == 'r' else sqlObj['max_count'], **queryArg)
+			if datagroup[1] == 'r':
+				reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index, **keyboardArg)
+			else:
+				reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]), **keyboardArg)
+			msg.message.edit(
+				text,
+				parse_mode = 'html',
+				reply_markup = reply_markup
+			)
+			if datagroup[1] == 'r' or max_index != sqlObj['max_count']:
+				self.update_max_count(datagroup[2], max_index, len(queryArg))
 
 	def handle_query_callback(self, client: Client, msg: CallbackQuery):
 		'''
@@ -583,33 +613,11 @@ class bot_search_helper(object):
 		datagroup = msg.data.split()
 
 		if datagroup[0] in ('msg', 'doc'):
-
-			if datagroup[1] in ('n', 'b', 'r'):
-				sqlObj = self.get_msg_history(datagroup[2], 'query' if datagroup[0] == 'doc' else 'search')
-				if datagroup[0] == 'doc':
-					_type = sqlObj.pop('type')
-					queryArg = dict(table = 'document_index', _type = _type)
-					keyboardArg = dict(head = 'doc')
-				else:
-					queryArg, keyboardArg = {}, {}
-				args = eval(sqlObj['args'])
-				if datagroup[1] == 'r':
-					timestr = time.strftime('%Y-%m-%d %H:%M:%S')
-					self.conn.execute(f"UPDATE `{'search' if datagroup[0] == 'msg' else 'query'}_history` SET `timestamp` = %s WHERE `_id` = %s", (timestr, datagroup[2]))
-					sqlObj['timestamp'] = timestr
-				step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
-				text, max_index = self.query_history(args, step, sqlObj['timestamp'], max_count = None if datagroup[1] == 'r' else sqlObj['max_count'], **queryArg)
-				if datagroup[1] == 'r':
-					reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index, **keyboardArg)
-				else:
-					reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]), **keyboardArg)
-				msg.message.edit(
-					text,
-					parse_mode = 'html',
-					reply_markup = reply_markup
-				)
-				if datagroup[1] == 'r':
-					self.update_max_count(datagroup[2], max_index, len(queryArg))
+			if not self.update_lock.acquire(False): return msg.answer('You click too fast!')
+			try:
+				self.handle_page_select(datagroup, msg)
+			finally:
+				self.update_lock.release()
 
 		elif datagroup[0] == 'set':
 
@@ -723,6 +731,7 @@ class bot_search_helper(object):
 		return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `query_history` WHERE `hash` = %s", self.get_msg_query_hash(_type, args))
 
 	def update_max_count(self, _id: int, max_count: int, doc: bool = False):
+		logger.debug('Setting `max_count` to %d', max_count)
 		self.conn.execute(f"UPDATE `{'query' if doc else 'search'}_history` SET `max_count` = %s WHERE `_id` = %s", (max_count, _id))
 
 	@staticmethod
@@ -756,6 +765,8 @@ class bot_search_helper(object):
 		self.bot.stop()
 
 if __name__ == "__main__":
+	logging.getLogger("pyrogram").setLevel(logging.WARNING)
+	logging.basicConfig(level=logging.WARNING, format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 	b = bot_search_helper()
 	b.start()
 	b.bot.idle()

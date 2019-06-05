@@ -18,7 +18,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from queue import Queue
-from libpy3.mysqldb import mysqldb
+from libpy3.mysqldb import mysqldb, pymysql
 from threading import Thread
 from pyrogram import Client, Message, User, Chat
 import time
@@ -27,6 +27,7 @@ import traceback
 import threading
 from type_user import user_profile
 import logging
+import hashlib
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -95,7 +96,7 @@ class msg_tracker_thread_class(Thread):
 			else:
 				_type = 'text'
 		
-		if msg.edit_date:
+		if msg.edit_date is not None:
 			sqlObj = self.conn.query1("SELECT `_id`, `text` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
 					'document_' if _type != 'text' else ''
 				), (msg.chat.id, msg.message_id))
@@ -104,6 +105,16 @@ class msg_tracker_thread_class(Thread):
 				self.conn.execute("UPDATE `{}index` SET `text` = %s WHERE `_id` = %s".format(
 						'document_' if _type != 'text' else ''
 					), (text, sqlObj['_id']))
+				if msg.edit_date != 0:
+					self.conn.execute("INSERT INTO `edit_history` (`chat_id` , `from_user`, `message_id`, `text`, `timestamp`) VALUE (%s, %s, %s, %s, %s)",
+						(
+							msg.chat.id,
+							msg.from_user.id if msg.from_user else msg.chat.id,
+							msg.message_id,
+							sqlObj['text'],
+							datetime.datetime.fromtimestamp(msg.edit_date)
+						)
+					)
 				return
 
 		self.conn.execute(
@@ -230,3 +241,54 @@ class msg_tracker_thread_class(Thread):
 			return msg.photo.sizes[-1].file_id
 		else:
 			return getattr(msg, _type).file_id
+
+class check_dup(threading.Thread):
+	def __init__(self, conn: mysqldb, delete: bool = False):
+		threading.Thread.__init__(self, daemon = True)
+		self.msg = []
+		self.conn = conn
+		self.delete = delete
+
+	def check(self):
+		last_id = self.conn.query1("SELECT `_id` FROM `index` ORDER BY `_id` DESC LIMIT 1")['_id']
+		total_count = self.conn.query1("SELECT COUNT(*) as `count` FROM `index` WHERE `_id` < %s", last_id)['count']
+		self.conn.execute("TRUNCATE `dup_check`")
+		logger.debug('Last id is %d, total count: %d', last_id, total_count)
+		for step in range(0, total_count, 200):
+			logger.debug('Current step: %d', step)
+			while True:
+				try:
+					sqlObjx = self.conn.query(f"SELECT `_id`, `chat_id`, `message_id`, `from_user` FROM `index` WHERE `_id` < %s LIMIT {step}, 200", (last_id,))
+					break
+				except:
+					traceback.print_exc()
+					time.sleep(1)
+			if len(sqlObjx) == 0: break
+			for sqlObj in sqlObjx:
+				_hash = self.get_hash(sqlObj)
+				#print(_hash)
+				try:
+					self.conn.execute("INSERT INTO `dup_check` (`hash`) VALUE (%s)", (_hash,))
+				except pymysql.IntegrityError:
+					self.msg.append(sqlObj['_id'])
+					print(_hash)
+			self.conn.commit()
+		with open('pending_delete', 'w') as fout:
+			fout.write(repr(self.msg))
+
+	def _delsql(self):
+		with open('pending_delete') as fin:
+			ls = eval(fin.read())
+		for x in ls:
+			self.conn.execute("DELETE FROM `index` WHERE `_id` = %s", x)
+		self.conn.commit()
+
+	def run(self):
+		if self.delete:
+			self._delsql()
+		else:
+			self.check()
+
+	@staticmethod
+	def get_hash(sqlObj: dict):
+		return hashlib.sha256(' '.join(map(str, (sqlObj['chat_id'], sqlObj['message_id'], sqlObj['from_user']))).encode()).hexdigest()

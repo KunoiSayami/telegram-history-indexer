@@ -19,6 +19,25 @@ CREATE TABLE IF NOT EXISTS `document_index` (
   PRIMARY KEY (`_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Dumping structure for table dup_check
+DROP TABLE IF EXISTS `dup_check`;
+CREATE TABLE IF NOT EXISTS `dup_check` (
+  `hash` varchar(64) COLLATE utf8_unicode_ci NOT NULL,
+  PRIMARY KEY (`hash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+-- Dumping structure for table edit_history
+DROP TABLE IF EXISTS `edit_history`;
+CREATE TABLE IF NOT EXISTS `edit_history` (
+  `_id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `chat_id` bigint(20) NOT NULL,
+  `from_user` bigint(20) NOT NULL,
+  `message_id` int(10) unsigned NOT NULL,
+  `text` text COLLATE utf8mb4_unicode_ci,
+  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Dumping structure for table index
 DROP TABLE IF EXISTS `index`;
 CREATE TABLE IF NOT EXISTS `index` (
@@ -54,10 +73,11 @@ CREATE TABLE IF NOT EXISTS `media_cache` (
 DROP TABLE IF EXISTS `query_history`;
 CREATE TABLE IF NOT EXISTS `query_history` (
   `_id` int(11) NOT NULL AUTO_INCREMENT,
+  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `type` enum('document','photo','video','animation','voice') CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
   `args` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL,
-  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `hash` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci NOT NULL,
+  `max_count` int(10) unsigned NOT NULL DEFAULT '0',
   PRIMARY KEY (`_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -68,6 +88,7 @@ CREATE TABLE IF NOT EXISTS `search_history` (
   `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `args` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL,
   `hash` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `max_count` int(10) unsigned NOT NULL DEFAULT '0',
   PRIMARY KEY (`_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
