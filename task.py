@@ -68,6 +68,8 @@ class msg_tracker_thread_class(Thread):
 		self.notify = notify
 		if self.notify is None:
 			self.notify = fake_notify_class()
+		
+		self.emergency_mode = False
 
 	def start(self):
 		logger.debug('Starting `msg_tracker_thread_class\'')
@@ -148,11 +150,16 @@ class msg_tracker_thread_class(Thread):
 		while not self.msg_queue.empty():
 			msg = self.msg_queue.get_nowait()
 			if self.filter_func(msg): continue
-			try:
-				self._filter_msg(msg)
-			except:
-				self.notify.send(traceback.format_exc())
-				traceback.print_exc()
+			if not self.emergency_mode:
+				try:
+					self._filter_msg(msg)
+				except:
+					self.emergency_mode = True
+					self.emergency_write(msg)
+					self.notify.send(traceback.format_exc())
+					traceback.print_exc()
+			else:
+				self.emergency_write(msg)
 
 	def user_tracker(self):
 		logger.debug('`user_tracker\' started!')
@@ -163,9 +170,21 @@ class msg_tracker_thread_class(Thread):
 			self._user_tracker()
 			self.conn.commit()
 
+	def emergency_write(self, obj: Message):
+		with open(f'emergency_{"msg" if isinstance(obj, Message) else "user"}.bk', 'a') as fout:
+			fout.write(repr(obj) + '\n')
+
 	def _user_tracker(self):
 		while not self.user_queue.empty():
-			self._real_user_index(self.user_queue.get_nowait())
+			u = self.user_queue.get_nowait()
+			if not self.emergency_mode:
+				try:
+					self._real_user_index(u)
+				except:
+					self.emergency_mode = True
+					self.emergency_write(u)
+			else:
+				self.emergency_write(u)
 
 	def insert_username(self, user: User or Chat):
 		if user.username is None:

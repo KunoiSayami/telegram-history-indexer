@@ -25,6 +25,7 @@ import traceback
 from spider import iter_user_messages
 import logging
 import task
+import time
 
 class history_index_class(object):
 	def __init__(self, client: Client = None, conn: mysqldb = None, other_client: Client or bool = None):
@@ -86,14 +87,12 @@ class history_index_class(object):
 			notify = task.notify_class(self.other_client, self.owner),
 			other_client = self.other_client
 		)
-		self.trackers.start()
 
 		self.client.add_handler(MessageHandler(self.pre_process), 999)
 		self.client.add_handler(MessageHandler(self.handle_all_message), 999)
 		self.client.add_handler(DisconnectHandler(self.handle_disconnect), 999)
 
 		self.index_dialog = iter_user_messages(self)
-		self.index_dialog.recheck()
 
 		self.logger.info('History indexer init success')
 
@@ -115,9 +114,12 @@ class history_index_class(object):
 		self.trackers.push(msg)
 
 	def start(self):
+		self.logger.info('start indexer')
+		self.trackers.start()
 		if self.other_client != self.client:
 			self.other_client.start()
 		self.client.start()
+		self.index_dialog.recheck()
 
 	def process_magic_function(self, msg: Message):
 		self.client.send(api.functions.messages.ReadHistory(peer = self.client.resolve_peer(msg.chat.id), max_id = msg.message_id))
@@ -139,6 +141,9 @@ class history_index_class(object):
 		if self._init:
 			self.conn.close()
 		self.logger.debug('Disconnecting...')
+		if self.trackers.emergency_mode:
+			self.logger.warning('Emergency mode enabled! Wait more time to finish write.')
+			time.time(2)
 
 if __name__ == "__main__":
 	history_index_class(other_client = True).start()
