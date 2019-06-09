@@ -853,7 +853,7 @@ class bot_search_helper(object):
 			return self.conn.query1("SELECT `_id`, `max_count`, `timestamp` FROM `query_result_cache` ORDER BY `_id` DESC LIMIT 1")
 
 	def get_search_history(self, _id: int):
-		return self.conn.query1(f"SELECT `args`, `timestamp`, `max_count`, `cache_hash` FROM `query_result_cache` WHERE `_id` = %s", (_id,))
+		return self.conn.query1("SELECT `args`, `timestamp`, `max_count`, `cache_hash`, `type` FROM `query_result_cache` WHERE `_id` = %s", (_id,))
 
 	def query_from_cache_table(self, _id: int):
 		return self.conn.query1("SELECT `cache` FROM `query_result_cache` WHERE `_id` = %s AND `hash` = %s", (_id, self.settings_hash()))
