@@ -36,17 +36,19 @@ import logging
 from queue import Queue
 import datetime
 import pyrogram.errors
-
 logger = logging.getLogger('index_bothelper')
 
 class type_sql_cache(object):
-	def __init__(self, _id: int, step: int = None, cache: str = None):
+	def __init__(self, _id: int, step: int = None, cache: str = None, settings_hash: str = None):
 		self.cache_id = _id
 		self.step = step
 		self.cache = cache
+		self.settings_hash = settings_hash
 
 	def __repr__(self):
-		return 'type_sql_cache(_id = %d, step = %s, cache = %s)'%(self.cache_id, self.step, len(eval(self.cache)) if self.cache is not None else None)
+		return 'type_sql_cache(_id = %d, step = %s, settings_hash = %s, cache = %s)'%(
+			self.cache_id, self.step, self.settings_hash, len(eval(self.cache)) if self.cache is not None else None
+		)
 
 class sql_cache_thread(threading.Thread):
 	def __init__(self, conn: mysqldb, update_cache: 'callable'):
@@ -73,15 +75,14 @@ class sql_cache_thread(threading.Thread):
 		while not self.queue.empty():
 			cache_obj = self.queue.get_nowait()
 			logger.debug('Cache_obj => %s', repr(cache_obj))
-			if cache_obj.step is not None and cache_obj.cache is not None:
-				self.conn.execute("UPDATE `query_result_cache` SET `cache` = %s, `step` = %s WHERE `_id` = %s", (cache_obj.cache, cache_obj.step, cache_obj.cache_id))
-				logger.debug('Update #%d cache, step set to %d', cache_obj.cache_id, cache_obj.step)
-			elif cache_obj.step is not None:
-				logger.debug('Calling update cache fucntion')
-				self.update_cache(cache_obj.cache_id, cache_obj.step)
-			elif cache_obj.cache is not None:
-				self.conn.execute("UPDATE `query_result_cache` SET `cache` = %s WHERE `_id` = %s", (cache_obj.cache, cache_obj.cache_id))
+			if cache_obj.cache is not None:
+				logger.debug('Starting #%d cache', cache_obj.cache_id)
+				self.conn.execute("UPDATE `query_result_cache` SET `cache` = %s, `cache_hash` = %s WHERE `_id` = %s", (
+					cache_obj.cache, cache_obj.settings_hash, cache_obj.cache_id
+				))
 				logger.debug('Update #%d cache', cache_obj.cache_id)
+			elif cache_obj.step is not None:
+				self.update_cache(cache_obj.cache_id, cache_obj.step)
 
 	def push(self, cacheObj: type_sql_cache):
 		self.queue.put_nowait(cacheObj)
@@ -113,12 +114,12 @@ class user_cache_thread(threading.Thread):
 		if user_id not in self._cache_dict:
 			sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user_id)
 			if sqlObj is not None:
-				self._cache_dict.update({user_id: {'full_name': user(**sqlObj).full_name.replace('`', ''), 'timestamp': time.time()}})
+				self._cache_dict.update({user_id: {'full_name': user(**sqlObj).full_name, 'timestamp': time.time()}})
 			else:
 				return user_id
 		else:
 			self._cache_dict[user_id]['timestamp'] = time.time()
-		return '{1}` (`{0}'.format(user_id, self._cache_dict[user_id]['full_name'])
+		return '{1}</code> (<code>{0}'.format(user_id, self._cache_dict[user_id]['full_name'])
 
 class bot_search_helper(object):
 	STEP = re.compile(r'Page: (\d+) / \d+')
@@ -422,17 +423,15 @@ class bot_search_helper(object):
 
 		update_request = False
 
-		#search_check = self.check_duplicate_msg_history_search_request(args)
 		search_check = self.check_query_duplicate(args)
 		if search_check is None:
 			update_request = True
-			#search_check = self.insert_msg_search_history(args)
 			search_check = self.insert_query_cache_table(args)
 		search_id, timestamp = search_check['_id'], search_check['timestamp']
 
 		text, max_count = self._query_history(search_id, args, max_count = None if update_request else search_check['max_count'], timestamp = timestamp)
 		if text != '404 Not found':
-			msg.reply(text, parse_mode = 'markdown', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count))
+			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count))
 		else:
 			msg.reply(text, True)
 
@@ -474,7 +473,7 @@ class bot_search_helper(object):
 			args = list(args)
 		tmp = list(tuple(set(items)) for items in map(lambda x : (f'%{x}%', f'%{ccs2t.convert(x)}%'), args))
 		SqlStr = ' AND '.join(['({})'.format(' OR '.join('`text` LIKE %s' for y in x)) for x in tmp])
-		if _type != '' and _type is not None:
+		if _type:
 			if SqlStr != '':
 				SqlStr = ' AND '.join((SqlStr, '`type` = %s'))
 			else:
@@ -500,73 +499,43 @@ class bot_search_helper(object):
 		optionsStr = self.generate_options(sqlStr, timestamp)
 		return optionsStr, args, origin_timestamp
 
-	def query_history(self, _cache_index: int, args: list, step: int = 0, timestamp: str or "datetime.datetime" = '', *, max_count: int = None, callback: "callable" = None, table: str = 'index', _type: str = ''):
-		raise RuntimeError
-		optionsStr, args, origin_timestamp = self.generate_sql_options(args, timestamp, _type)
-		logger.debug('parse options successful')
-
-		if max_count is None:
-			max_count = self.conn.query1(f"SELECT COUNT(*) AS `count` FROM `{table}` WHERE {optionsStr}", args)['count']
-			logger.debug('Count result successful')
-		sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {step}, {self.page_limit}", args)
-		logger.debug('Query result successful')
-		if len(sqlObj):
-			if callback: return callback(sqlObj)
-			s = '{3}\n\nPage: {0} / {1}\nLast query: <code>{2}</code>'.format(
-				(step // self.page_limit) + 1,
-				# From: https://www.geeksforgeeks.org/g-fact-35-truncate-in-python/
-				math.ceil(max_count / self.page_limit),
-				origin_timestamp,
-				'\n'.join(self.show_query_msg_result(x) for x in sqlObj)
-			), max_count
-			logger.debug('Return result')
-			return s
-		return '404 Not found', 0
-
 	def update_cache(self, cache_index: int, step: int):
-		logger.debug('Calling `update_cache`, cache_index => %d, step => %d', cache_index, step)
+
 		sqlObj = self.conn.query1("SELECT `args`, `timestamp`, `type`, `max_count` FROM `query_result_cache` WHERE `_id` = %s", cache_index)
 		upper_limit = step + 5 * self.PAGE_MAX
 		lower_limit = step - 5 * self.PAGE_MAX
-		logger.debug('Upper limit => %d, lower limit => %d', upper_limit, lower_limit)
+
 		if upper_limit > sqlObj['max_count']:
 			# Beyond max count, cache is not need
-			logger.debug('Upper limit beyond max_count')
 			return
 		if lower_limit < 0:
 			lower_limit = 0
-		optionsStr, args, origin_timestamp = self.generate_sql_options(sqlObj['args'], sqlObj['timestamp'], sqlObj['type'])
+		optionsStr, args, origin_timestamp = self.generate_sql_options(eval(sqlObj['args']), sqlObj['timestamp'], sqlObj['type'])
+
 		sqlObj = self.conn.query(f"SELECT * FROM `{ 'document_' if sqlObj['type'] is not None else ''}index` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {lower_limit}, {10 * self.PAGE_MAX}", args)
-		self.query_cache.push(type_sql_cache(cache_index, step = lower_limit, cache = repr(sqlObj)))
+
+		self.conn.execute("UPDATE `query_result_cache` SET `cache` = %s, `step` = %s WHERE `_id` = %s", (repr(sqlObj), lower_limit, cache_index))
 
 	def __cache_query(self, cache_index: int, step: int, optionsStr: str, args: list, table: str, force_update: bool = False):
-		#logger.debug('Cache index %d', cache_index)
 		sqlObj = self.conn.query1("SELECT `cache`, `step`, `cache_hash` FROM `query_result_cache` WHERE `_id` = %s", cache_index)
 		# NOTE: Instruction to cache
 		# Cache should be text, step must real step of cache
 		# Cache hash should be setting hash
 		cache, cache_step, cache_hash = sqlObj['cache'], sqlObj['step'], sqlObj['cache_hash']
-		#logger.debug('Cache: %s, step: %d', cache == '', cache_step)
+
 
 		if cache == '' or cache_hash != self.settings_hash() or force_update:
 			# NOTE: only init cache require from this function
 			lower_limit = step - 5 * self.PAGE_MAX
 			if lower_limit < 0:
 				lower_limit = 0
-			logger.debug('Request end: %d', lower_limit)
 			sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {lower_limit}, {10 * self.PAGE_MAX}", args)
-			self.query_cache.push(type_sql_cache(cache_index, step = step, cache = repr(sqlObj)))
+			self.query_cache.push(type_sql_cache(cache_index, cache = repr(sqlObj), settings_hash = self.settings_hash()))
 		else:
-			#logger.debug('Hit cache!')
 			sqlObj = eval(cache)
+			if step > 2 * self.PAGE_MAX and abs((cache_step + 5 * self.PAGE_MAX) - step) > 4 * self.PAGE_MAX:
+				self.query_cache.push(type_sql_cache(cache_index, step = step))
 
-		#logger.debug('cache size: %d', len(sqlObj))
-
-		logger.debug('cache size: %d, Step => %d, abs((cache_step + 5 * self.PAGE_MAX) - step) => %d, cache_step => %d', len(sqlObj), step, abs((cache_step + 5 * self.PAGE_MAX) - step), cache_step)
-
-		if step > 3 * self.PAGE_MAX and abs((cache_step + 5 * self.PAGE_MAX) - step) > 3 * self.PAGE_MAX:
-			self.query_cache.push(type_sql_cache(cache_index, step = step))
-			logger.debug('Request getting new cache %d, step div: %d', cache_index, abs((cache_step + 5 * self.PAGE_MAX) - step))
 
 		return sqlObj[(step - cache_step): (step - cache_step) + self.page_limit]
 
@@ -585,33 +554,23 @@ class bot_search_helper(object):
 		):
 		'''need passing origin args to this function'''
 		optionsStr, args, origin_timestamp = self.generate_sql_options(original_args, timestamp, _type)
-		#args, sqlStr = self.generate_args(args, _type)
 
-		#logger.debug('Generate args successful')
-
-		#optionsStr = self.generate_options(sqlStr, timestamp)
-
-		#logger.debug('parse options successful')
 		force_update = max_count is None
 
 		if max_count is None:
 			max_count = self.conn.query1(f"SELECT COUNT(*) AS `count` FROM `{table}` WHERE {optionsStr}", args)['count']
-			#logger.debug('Count result successful')
 
-		sqlObj = self.__cache_query(int(cache_index), step, optionsStr, original_args, table, force_update)
+		sqlObj = self.__cache_query(int(cache_index), step, optionsStr, args, table, force_update)
 
-		#logger.debug('Query result successful')
 		if len(sqlObj):
 			if callback: return callback(sqlObj)
-			s = '{3}\n\nPage: {0} / {1}\nLast query: `{2}`'.format(
+			return '{3}\n\nPage: {0} / {1}\nLast query: <code>{2}</code>'.format(
 				(step // self.page_limit) + 1,
 				# From: https://www.geeksforgeeks.org/g-fact-35-truncate-in-python/
 				math.ceil(max_count / self.page_limit),
 				origin_timestamp,
 				'\n'.join(self.show_query_msg_result(x) for x in sqlObj)
 			), max_count
-			#logger.debug('Return result')
-			return s
 		return '404 Not found', 0
 
 	def query_mapping_lists(self, _: Client, msg: Message):
@@ -635,18 +594,15 @@ class bot_search_helper(object):
 		if len(repr(args)) > 128:
 			return msg.reply('Query option too long!')
 
-		#search_check = self.check_duplicate_msg_history_query_request(_type, args)
 		search_check = self.check_query_duplicate(args, _type)
 		if search_check is None:
 			update_request = True
-			#search_check = self.insert_msg_query_history(_type, args)
 			search_check = self.insert_query_cache_table(args, _type)
 		search_id, timestamp = search_check['_id'], search_check['timestamp']
 
-		#text, max_count = self.query_history(args, 0, timestamp, max_count = None if update_request else search_check['max_count'], table = 'document_index', _type = _type)
 		text, max_count = self._query_history(search_id, args, 0, timestamp, max_count = None if update_request else search_check['max_count'], table = 'document_index', _type = _type)
 		if text != '404 Not found':
-			msg.reply(text, parse_mode = 'markdown', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count, head = 'doc'))
+			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count, head = 'doc'), disable_web_page_preview = True)
 		else:
 			msg.reply(text, True)
 
@@ -666,12 +622,12 @@ class bot_search_helper(object):
 			return msg.reply('Please reply a search result message (except 404 message)', True)
 		if msg.reply_to_message.reply_markup is None or msg.reply_to_message.reply_markup.inline_keyboard[-1][0].text != 'Re-search':
 			return msg.reply('Inline keyboard not found!', True)
+		_index = msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.split()[-1]
 		sqlObj = self.get_msg_history(msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.split()[-1])
-		print(msg.reply_to_message.reply_markup)
 		if sqlObj is None:
 			return msg.reply('404 Search index not found')
 		step = self.STEP.search(msg.reply_to_message.text).group(1)
-		kb = self.query_history(eval(sqlObj['args']), (int(step) - 1) * self.page_limit, sqlObj['timestamp'], max_count = sqlObj['max_count'], callback = self.generate_select_keyboard)
+		kb = self._query_history(eval(sqlObj['args']), _index, (int(step) - 1) * self.page_limit, sqlObj['timestamp'], max_count = sqlObj['max_count'], callback = self.generate_select_keyboard)
 		if isinstance(kb, tuple): return
 		msg.reply('Please select a message:', True, reply_markup = kb)
 
@@ -701,15 +657,15 @@ class bot_search_helper(object):
 		d['timestamp'] = d['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
 		if d['text'] and len(d['text']) > 750: # prevert message too long
 			d['text'] = d['text'][:750] + '...'
-		d['forward_info'] = '**Forward From**: `{forward_from}`{detail_switch}\n'.format(**d) if d['forward_from'] else ''
-		d['text_info'] = '**Text**:\n```{}```\n'.format(d['text'].replace('`', '')) if d['text'] else ''
-		d['media_info'] = '**File type**: `{0}`\n**File id**: `{1}`\n'.format(d['type'], d['file_id']) if 'type' in d else ''
+		d['forward_info'] = '<b>Forward From</b>: <code>{forward_from}</code>{detail_switch}\n'.format(**d) if d['forward_from'] else ''
+		d['text_info'] = '<b>Text</b>:<pre>\n{}</pre>\n'.format(d['text']) if d['text'] else ''
+		d['media_info'] = '<b>File type</b>: <code>{0}</code>\n<b>File id</b>: <code>{1}</code>\n'.format(d['type'], d['file_id']) if 'type' in d else ''
 
 		return (
-			'**Chat id**: `{chat_id}`{detail_switch}\n'
-			'**From user**: `{from_user}`{detail_switch}\n'
-			'**Message id**: `{message_id}`\n'
-			'**Timestamp**: `{timestamp}`\n'
+			'<b>Chat id</b>: <code>{chat_id}</code>{detail_switch}\n'
+			'<b>From user</b>: <code>{from_user}</code>{detail_switch}\n'
+			'<b>Message id</b>: <code>{message_id}</code>\n'
+			'<b>Timestamp</b>: <code>{timestamp}</code>\n'
 			'{forward_info}'
 			'{media_info}'
 			'{text_info}'
@@ -737,32 +693,38 @@ class bot_search_helper(object):
 
 	def handle_page_select(self, datagroup: list, msg: CallbackQuery):
 		if datagroup[1] in ('n', 'b', 'r'):
-			#sqlObj = self.get_msg_history(datagroup[2], 'query' if datagroup[0] == 'doc' else 'search')
+
 			sqlObj = self.get_search_history(datagroup[2])
+
 			if datagroup[0] == 'doc':
 				_type = sqlObj.pop('type')
 				queryArg = dict(table = 'document_index', _type = _type)
 				keyboardArg = dict(head = 'doc')
 			else:
 				queryArg, keyboardArg = {}, {}
+
 			args = eval(sqlObj['args'])
 			if datagroup[1] == 'r':
 				timestr = time.strftime('%Y-%m-%d %H:%M:%S')
-				#self.conn.execute(f"UPDATE `{'search' if datagroup[0] == 'msg' else 'query'}_history` SET `timestamp` = %s WHERE `_id` = %s", (timestr, datagroup[2]))
+
 				self.conn.execute("UPDATE `query_result_cache` SET `timestamp` = %s WHERE `_id` = %s", (timestr, datagroup[2]))
 				sqlObj['timestamp'] = timestr
+
 			step = (int(datagroup[3]) + (self.page_limit if datagroup[1] == 'n' else -self.page_limit)) if datagroup[1] != 'r' else 0
-			#text, max_index = self.query_history(args, step, sqlObj['timestamp'], max_count = None if datagroup[1] == 'r' else sqlObj['max_count'], **queryArg)
+
 			text, max_index = self._query_history(datagroup[2], args, step, sqlObj['timestamp'], max_count = None if datagroup[1] == 'r' else sqlObj['max_count'], **queryArg)
+
 			if datagroup[1] == 'r':
 				reply_markup = self.generate_message_search_keyboard(datagroup[1], datagroup[2], 0, max_index, **keyboardArg)
 			else:
 				reply_markup = self.generate_message_search_keyboard(datagroup[1], *(int(x) for x in datagroup[2:]), **keyboardArg)
+
 			msg.message.edit(
 				text,
-				#parse_mode = 'html',
+				parse_mode = 'html',
 				reply_markup = reply_markup
 			)
+
 			if datagroup[1] == 'r' or max_index != sqlObj['max_count']:
 				self.update_max_count(datagroup[2], max_index)
 
@@ -877,56 +839,27 @@ class bot_search_helper(object):
 
 	def check_query_duplicate(self, args: list, _type: str = None):
 		# NOTE:
-		# Please check None in _type in para should be ''
+		# Please check None in _type in parameter should be ''
 		# None means search table
 		# Two table may merge in the feature
 		# Same rule in `insert_query_cache_table' function
-		#return self.conn.query1(f"SELECT `_id`, `timestamp`, `max_count` FROM `{'search' if _type is None else 'query'}_history` WHERE `hash` = %s",
 		return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `query_result_cache` WHERE `hash` = %s",
 			(self.get_msg_hash(args, _type),))
 
 	def insert_query_cache_table(self, args: list, _type: str = None):
 		with self.db_cache_lock:
-			#self.conn.execute("INSERT INTO `query_result_cache` (`hash`, `cache`), VALUE (%s, %s)", (self.settings_hash(), ''))
 			self.conn.execute("INSERT INTO `query_result_cache` (`type`, `args`, `hash`, `cache_hash`, `cache`) VALUE (%s, %s, %s, %s, %s)",
 				(_type, repr(args), self.get_msg_hash(args, _type), self.settings_hash(), ''))
 			return self.conn.query1("SELECT `_id`, `max_count`, `timestamp` FROM `query_result_cache` ORDER BY `_id` DESC LIMIT 1")
-			#if _type is not None:
-			#	self.conn.execute("INSERT INTO `query_history` (`_id`, `type`, `args`, `hash`) VALUE (%s, %s, %s)", (_type, repr(args), self.get_msg_query_hash(_type, args)))
-			#else:
-			#	self.conn.execute("INSERT INTO `search_history` (`_id`, `args`, `hash`) VALUE (%s, %s)", (repr(args), self.get_msg_search_hash(args)))
 
 	def get_search_history(self, _id: int):
-		return self.conn.query1(f"SELECT `args`, `timestamp`, `max_count` FROM `query_result_cache` WHERE `_id` = %s", (_id,))
+		return self.conn.query1(f"SELECT `args`, `timestamp`, `max_count`, `cache_hash` FROM `query_result_cache` WHERE `_id` = %s", (_id,))
 
 	def query_from_cache_table(self, _id: int):
 		return self.conn.query1("SELECT `cache` FROM `query_result_cache` WHERE `_id` = %s AND `hash` = %s", (_id, self.settings_hash()))
 
-	def insert_msg_search_history(self, args: list):
-		with self.db_search_lock:
-			self.conn.execute("INSERT INTO `search_history` (`args`, `hash`) VALUE (%s, %s)", (repr(args), self.get_msg_search_hash(args)))
-			return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `search_history` ORDER BY `_id` DESC LIMIT 1")
-
-	def check_duplicate_msg_history_search_request(self, args: list):
-		return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `search_history` WHERE `hash` = %s", self.get_msg_search_hash(args))
-
-	def get_msg_history(self, _id: int, table: str = 'search'):
-		if table == 'search':
-			return self.conn.query1(f"SELECT `args`, `timestamp`, `max_count` FROM `{table}_history` WHERE `_id` = %s", (_id,))
-		else:
-			return self.conn.query1(f"SELECT `args`, `type`, `timestamp`, `max_count` FROM `{table}_history` WHERE `_id` = %s", (_id,))
-
-	def insert_msg_query_history(self, _type: str, args: list):
-		with self.db_query_lock:
-			self.conn.execute("INSERT INTO `query_history` (`type`, `args`, `hash`) VALUE (%s, %s, %s)", (_type, repr(args), self.get_msg_query_hash(_type, args)))
-			return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `query_history` ORDER BY `_id` DESC LIMIT 1")
-
-	def check_duplicate_msg_history_query_request(self, _type: str, args: list):
-		return self.conn.query1("SELECT `_id`, `timestamp`, `max_count` FROM `query_history` WHERE `hash` = %s", self.get_msg_query_hash(_type, args))
-
-	def exupdate_max_count(self, _id: int, max_count: int, doc: bool = False):
-		logger.debug('Setting `max_count` to %d', max_count)
-		self.conn.execute(f"UPDATE `{'query' if doc else 'search'}_history` SET `max_count` = %s WHERE `_id` = %s", (max_count, _id))
+	def get_msg_history(self, _id: int):
+		return self.conn.query1("SELECT `args`, `timestamp`, `max_count` FROM `query_result_cache` WHERE `_id` = %s", _id)
 
 	def update_max_count(self, _id: int, max_count: int):
 		logger.debug('Setting `max_count` to %d', max_count)
