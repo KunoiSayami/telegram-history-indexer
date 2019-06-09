@@ -30,7 +30,7 @@ import math
 import re
 import opencc
 import itertools
-from type_user import hashable_user as user
+from type_custom import hashable_user as user, hashable_message_record as hashmsg
 import task
 import logging
 from queue import Queue
@@ -107,10 +107,10 @@ class user_cache_thread(threading.Thread):
 				self._cache_dict.pop(x)
 			time.sleep(60)
 
-	def get(self, user_id: int):
-		return self._get(user_id)
+	def get(self, user_id: int, no_id: bool = False):
+		return self._get(user_id, no_id)
 
-	def _get(self, user_id: int):
+	def _get(self, user_id: int, no_id: bool):
 		if user_id not in self._cache_dict:
 			sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user_id)
 			if sqlObj is not None:
@@ -119,7 +119,8 @@ class user_cache_thread(threading.Thread):
 				return user_id
 		else:
 			self._cache_dict[user_id]['timestamp'] = time.time()
-		return '{1}</code> (<code>{0}'.format(user_id, self._cache_dict[user_id]['full_name'])
+		return '{1}</code> (<code>{0}'.format(user_id, self._cache_dict[user_id]['full_name']) if not no_id else \
+			self._cache_dict[user_id]['full_name']
 
 class bot_search_helper(object):
 	STEP = re.compile(r'Page: (\d+) / \d+')
@@ -177,19 +178,20 @@ class bot_search_helper(object):
 			self.conn = conn
 			self._init = True
 
-		self.db_query_lock = threading.Lock()
-		self.db_search_lock = threading.Lock()
 		self.db_cache_lock = threading.Lock()
 		self.search_lock = threading.Lock()
 		self.update_lock = threading.Lock()
+		self.edit_queue_lock = threading.Lock()
 
 		self.user_cache = user_cache_thread(self.conn)
 		self.query_cache = sql_cache_thread(self.conn, self.update_cache)
 
+	def start(self):
 		self.bot.add_handler(MessageHandler(self.handle_forward, Filters.private & Filters.user(self.owner) & Filters.forwarded), -1)
 
 		# MessageHandler For groups
 		self.bot.add_handler(MessageHandler(self.handle_join_group, Filters.new_chat_members))
+		self.bot.add_handler(MessageHandler(self.handle_query_edits, Filters.group & Filters.command('edits')))
 
 		# MessageHandler For query
 		self.bot.add_handler(MessageHandler(self.handle_search_user, Filters.private & Filters.user(self.owner) & Filters.command('su')))
@@ -209,12 +211,38 @@ class bot_search_helper(object):
 
 		self.bot.add_handler(DisconnectHandler(self.handle_disconnect))
 
-	def start(self):
 		self.user_cache.start()
 		self.initialize_setting()
 		self.query_cache.start()
 		self.bot.start()
 		logger.info('Bot started succesful')
+
+	def query_current_messages(self, d: hashmsg):
+		sqlObj = self.conn.query1("SELECT * FROM `index` WHERE `chat_id` = %s AND `message_id` = %s", (d.chat_id, d.message_id))
+		if sqlObj is None:
+			return ''
+		return '[ORI] <code>{0}</code> (<code>{1}</code>): <pre>{2}</pre>\n[EDITED] <code>{3}</code> (<code>{4}</code>): <pre>{5}</pre>'.format(
+			self.user_cache.get(d.from_user, True), d.timestamp, d.text, self.user_cache.get(sqlObj['from_user'], True), sqlObj['timestamp'], sqlObj['text']
+		)
+
+	def handle_query_edits(self, _client: Client, msg: Message):
+		if not self.edit_queue_lock.acquire(False):
+			return msg.reply('Another query in progress, please wait a moment')
+		try:
+			self._handle_query_edits(msg)
+		finally:
+			self.edit_queue_lock.release()
+
+	def _handle_query_edits(self, msg: Message):
+		edits_set = set()
+		step = 0
+		while len(edits_set) < 10:
+			sqlObj = self.conn.query(f"SELECT * FROM `edit_history` WHERE `chat_id` = %s ORDER BY `timestamp` DESC LIMIT {step}, {10 - len(edits_set)}", msg.chat.id)
+			if sqlObj is None: break
+			step += len(sqlObj) - 1
+			for msgs in sqlObj:
+				edits_set.add(hashmsg(**msgs))
+		msg.reply('\n\n'.join(list(set([self.query_current_messages(x) for x in edits_set]))), parse_mode = 'html')
 
 	def handle_close_keyboard(self, _client: Client, msg: Message):
 		if msg.reply_to_message.from_user.is_self:
@@ -623,7 +651,7 @@ class bot_search_helper(object):
 		if msg.reply_to_message.reply_markup is None or msg.reply_to_message.reply_markup.inline_keyboard[-1][0].text != 'Re-search':
 			return msg.reply('Inline keyboard not found!', True)
 		_index = msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.split()[-1]
-		sqlObj = self.get_msg_history(msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.split()[-1])
+		sqlObj = self.get_search_history(msg.reply_to_message.reply_markup.inline_keyboard[-1][0].callback_data.split()[-1])
 		if sqlObj is None:
 			return msg.reply('404 Search index not found')
 		step = self.STEP.search(msg.reply_to_message.text).group(1)
@@ -853,13 +881,10 @@ class bot_search_helper(object):
 			return self.conn.query1("SELECT `_id`, `max_count`, `timestamp` FROM `query_result_cache` ORDER BY `_id` DESC LIMIT 1")
 
 	def get_search_history(self, _id: int):
-		return self.conn.query1("SELECT `args`, `timestamp`, `max_count`, `cache_hash`, `type` FROM `query_result_cache` WHERE `_id` = %s", (_id,))
+		return self.conn.query1("SELECT `args`, `timestamp`, `max_count`, `cache_hash`, `type` FROM `query_result_cache` WHERE `_id` = %s", _id,)
 
 	def query_from_cache_table(self, _id: int):
 		return self.conn.query1("SELECT `cache` FROM `query_result_cache` WHERE `_id` = %s AND `hash` = %s", (_id, self.settings_hash()))
-
-	def get_msg_history(self, _id: int):
-		return self.conn.query1("SELECT `args`, `timestamp`, `max_count` FROM `query_result_cache` WHERE `_id` = %s", _id)
 
 	def update_max_count(self, _id: int, max_count: int):
 		logger.debug('Setting `max_count` to %d', max_count)

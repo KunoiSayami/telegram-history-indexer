@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# type_user.py
+# type_custom.py
 # Copyright (C) 2019 KunoiSayami
 #
 # This module is part of telegram-history-helper and is released under
@@ -93,3 +93,17 @@ class hashable_user(object):
 		return hash(self.user_id)
 	def __eq__(self, userObj):
 		return self.user_id == userObj.user_id
+	
+class hashable_message_record(object):
+	def __init__(self, chat_id: int, from_user: int, message_id: int, text: str, timestamp: 'datetime.datetime', **_kwargs):
+		self.chat_id = chat_id
+		self.from_user = from_user
+		self.message_id = message_id
+		self.text = text
+		self.timestamp = timestamp
+	def get_dict(self):
+		return {'user_id': self.from_user, 'text': self.text, 'timestamp': self.timestamp, 'message_id': self.message_id}
+	def __hash__(self):
+		return hash((self.chat_id, self.message_id))
+	def __eq__(self, messageObj):
+		return self.chat_id == messageObj.chat_id and self.message_id == messageObj.chat_id
