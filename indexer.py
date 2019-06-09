@@ -19,8 +19,8 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
-from pyrogram import Client, Message, MessageHandler, api, DisconnectHandler, ContinuePropagation
-import pyrogram.errors
+from pyrogram import Client, Message, MessageHandler, api, DisconnectHandler, ContinuePropagation, RawUpdateHandler, Update
+import pyrogram
 import traceback
 from spider import iter_user_messages
 import logging
@@ -88,9 +88,10 @@ class history_index_class(object):
 			other_client = self.other_client
 		)
 
-		self.client.add_handler(MessageHandler(self.pre_process), 999)
-		self.client.add_handler(MessageHandler(self.handle_all_message), 999)
-		self.client.add_handler(DisconnectHandler(self.handle_disconnect), 999)
+		self.client.add_handler(MessageHandler(self.pre_process), 888)
+		self.client.add_handler(MessageHandler(self.handle_all_message), 888)
+		self.client.add_handler(DisconnectHandler(self.handle_disconnect), 888)
+		self.client.add_handler(RawUpdateHandler(self.handle_raw_update), 999)
 
 		self.index_dialog = iter_user_messages(self)
 
@@ -102,6 +103,10 @@ class history_index_class(object):
 			msg.from_user and msg.from_user.id in self.filter_user:
 			return True
 		return False
+
+	def handle_raw_update(self, _client: Client, update: Update, *_args):
+		if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
+			self.trackers.push(update)
 
 	def pre_process(self, _: Client, msg: Message):
 		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
@@ -120,6 +125,7 @@ class history_index_class(object):
 			self.other_client.start()
 		self.client.start()
 		self.index_dialog.recheck()
+		self.index_dialog.start()
 
 	def process_magic_function(self, msg: Message):
 		self.client.send(api.functions.messages.ReadHistory(peer = self.client.resolve_peer(msg.chat.id), max_id = msg.message_id))
@@ -143,7 +149,7 @@ class history_index_class(object):
 		self.logger.debug('Disconnecting...')
 		if self.trackers.emergency_mode:
 			self.logger.warning('Emergency mode enabled! Wait more time to finish write.')
-			time.time(2)
+			time.sleep(2)
 
 if __name__ == "__main__":
 	history_index_class(other_client = True).start()

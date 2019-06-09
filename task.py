@@ -21,6 +21,7 @@ from queue import Queue
 from libpy3.mysqldb import mysqldb, pymysql
 from threading import Thread
 from pyrogram import Client, Message, User, Chat
+import pyrogram
 import time
 import datetime
 import traceback
@@ -149,16 +150,19 @@ class msg_tracker_thread_class(Thread):
 	def filter_msg(self):
 		while not self.msg_queue.empty():
 			msg = self.msg_queue.get_nowait()
+			if isinstance(msg, pyrogram.api.types.UpdateDeleteChannelMessages):
+				sz = [[msg.channel_id, x] for x in msg.messages]
+				self.conn.execute("INSERT INTO `deleted_message` (`chat_id`, `message_id`) VALUES (%s, %s)", sz, True)
+				continue
 			if self.filter_func(msg): continue
-			if not self.emergency_mode:
-				try:
-					self._filter_msg(msg)
-				except:
-					self.emergency_mode = True
-					self.emergency_write(msg)
-					self.notify.send(traceback.format_exc())
-					traceback.print_exc()
+			try:
+				self._filter_msg(msg)
+			except:
+				self.emergency_mode = True
+				self.notify.send(traceback.format_exc())
 			else:
+				self.emergency_mode = False
+			if self.emergency_mode:
 				self.emergency_write(msg)
 
 	def user_tracker(self):
@@ -177,13 +181,13 @@ class msg_tracker_thread_class(Thread):
 	def _user_tracker(self):
 		while not self.user_queue.empty():
 			u = self.user_queue.get_nowait()
-			if not self.emergency_mode:
-				try:
-					self._real_user_index(u)
-				except:
-					self.emergency_mode = True
-					self.emergency_write(u)
-			else:
+			try:
+				self._real_user_index(u)
+			except:
+				self.emergency_mode = True
+				traceback.print_exc()
+				print(u)
+			if self.emergency_mode:
 				self.emergency_write(u)
 
 	def insert_username(self, user: User or Chat):
@@ -240,6 +244,7 @@ class msg_tracker_thread_class(Thread):
 
 	def push(self, msg: Message):
 		self.msg_queue.put_nowait(msg)
+		if isinstance(msg, pyrogram.api.types.UpdateDeleteChannelMessages): return
 		users = [x.raw for x in list(set(user_profile(x) for x in [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat, msg.via_bot]))]
 		users.remove(None)
 		for x in users:
@@ -252,14 +257,11 @@ class msg_tracker_thread_class(Thread):
 			'animation' if msg.animation else \
 			'document' if msg.document else \
 			'text' if msg.text else \
-			'voice' if msg.voice else'error'
+			'voice' if msg.voice else 'error'
 	
 	@staticmethod
 	def get_file_id(msg: Message, _type: str):
-		if _type == 'photo':
-			return msg.photo.sizes[-1].file_id
-		else:
-			return getattr(msg, _type).file_id
+		return getattr(msg, _type).file_id
 
 class check_dup(threading.Thread):
 	def __init__(self, conn: mysqldb, delete: bool = False):

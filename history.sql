@@ -4,6 +4,15 @@
 /*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
 
+-- Dumping structure for table deleted_message
+DROP TABLE IF EXISTS `deleted_message`;
+CREATE TABLE IF NOT EXISTS `deleted_message` (
+  `_id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `chat_id` bigint(20) NOT NULL,
+  `message_id` int(10) unsigned NOT NULL,
+  PRIMARY KEY (`_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Dumping structure for table document_index
 DROP TABLE IF EXISTS `document_index`;
 CREATE TABLE IF NOT EXISTS `document_index` (
@@ -69,25 +78,18 @@ CREATE TABLE IF NOT EXISTS `media_cache` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 
--- Dumping structure for table query_history
-DROP TABLE IF EXISTS `query_history`;
-CREATE TABLE IF NOT EXISTS `query_history` (
-  `_id` int(11) NOT NULL AUTO_INCREMENT,
-  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `type` enum('document','photo','video','animation','voice') CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
-  `args` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL,
+-- Dumping structure for table query_result_cache
+DROP TABLE IF EXISTS `query_result_cache`;
+CREATE TABLE IF NOT EXISTS `query_result_cache` (
+  `_id` int(10) unsigned NOT NULL AUTO_INCREMENT,
   `hash` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci NOT NULL,
-  `max_count` int(10) unsigned NOT NULL DEFAULT '0',
-  PRIMARY KEY (`_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Dumping structure for table search_history
-DROP TABLE IF EXISTS `search_history`;
-CREATE TABLE IF NOT EXISTS `search_history` (
-  `_id` int(11) NOT NULL AUTO_INCREMENT,
-  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `cache_hash` varchar(64) CHARACTER SET utf8 COLLATE utf8_unicode_ci NOT NULL,
+  `type` enum('document','photo','video','animation','voice','') CHARACTER SET utf8 COLLATE utf8_unicode_ci DEFAULT NULL,
   `args` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL,
-  `hash` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `cache` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `cache_timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `step` int(10) unsigned NOT NULL DEFAULT '0',
   `max_count` int(10) unsigned NOT NULL DEFAULT '0',
   PRIMARY KEY (`_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

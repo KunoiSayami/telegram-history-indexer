@@ -30,7 +30,7 @@ class iter_user_messages(threading.Thread):
 		threading.Thread.__init__(self, daemon = True)
 
 		self.logger = logging.getLogger(__name__)
-		self.logger.setLevel(logging.DEBUG)
+		self.logger.setLevel(logging.WARNING)
 
 		self.client = indexer.client
 		self.conn = indexer.conn
@@ -113,7 +113,7 @@ class iter_user_messages(threading.Thread):
 
 	def _process_messages(self, user_id: int, offset_id: int, *, force_check: bool = False):
 		while offset_id > 1:
-			print(user_id, offset_id)
+			self.logger.debug('Current process %d %d',user_id, offset_id)
 			while True:
 				try:
 					msg_his = self.client.get_history(user_id, offset_id = offset_id)
@@ -139,6 +139,7 @@ class iter_user_messages(threading.Thread):
 
 	def recheck(self, force_check: bool = False):
 		sqlObj = self.conn.query1("SELECT `timestamp` FROM `index` ORDER BY `timestamp` DESC LIMIT 1")
+		self.logger.debug('Rechecking...')
 		if force_check or (sqlObj and (datetime.now() - sqlObj['timestamp']).total_seconds() > 60 * 30):
 			if isinstance(self.end_time, int) and self.end_time == 0:
 				self.end_time = sqlObj['timestamp'].replace(tzinfo=timezone.utc).timestamp()
