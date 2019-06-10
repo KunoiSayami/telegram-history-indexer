@@ -237,13 +237,14 @@ class bot_search_helper(object):
 	def _handle_query_edits(self, msg: Message):
 		edits_set = set()
 		step = 0
-		while len(edits_set) < 10:
-			sqlObj = self.conn.query(f"SELECT * FROM `edit_history` WHERE `chat_id` = %s ORDER BY `timestamp` DESC LIMIT {step}, {10 - len(edits_set)}", msg.chat.id)
+		timediff = time.time()
+		while len(edits_set) < 3:
+			sqlObj = self.conn.query(f"SELECT * FROM `edit_history` WHERE `chat_id` = %s ORDER BY `timestamp` DESC LIMIT {step}, {3 - len(edits_set)}", msg.chat.id)
 			if sqlObj is None: break
 			step += len(sqlObj) - 1
 			for msgs in sqlObj:
 				edits_set.add(hashmsg(**msgs))
-		msg.reply('\n\n'.join(list(set([self.query_current_messages(x) for x in edits_set]))), parse_mode = 'html')
+		msg.reply("%s\n\nTime spend: %.2fs" % ('\n\n'.join(list(set([self.query_current_messages(x) for x in edits_set]))), time.time() - timediff), parse_mode = 'html')
 
 	def handle_close_keyboard(self, _client: Client, msg: Message):
 		if msg.reply_to_message.from_user.is_self:
@@ -582,6 +583,7 @@ class bot_search_helper(object):
 			_type: str = ''
 		):
 		'''need passing origin args to this function'''
+		timediff = time.time()
 		optionsStr, args, origin_timestamp = self.generate_sql_options(original_args, timestamp, _type)
 
 		force_update = max_count is None
@@ -593,12 +595,13 @@ class bot_search_helper(object):
 
 		if len(sqlObj):
 			if callback: return callback(sqlObj)
-			return '{3}\n\nPage: {0} / {1}\nLast query: <code>{2}</code>'.format(
+			return '{3}\n\nPage: {0} / {1}\nLast query: <code>{2}</code>\nTime spend: {4:.2f}s'.format(
 				(step // self.page_limit) + 1,
 				# From: https://www.geeksforgeeks.org/g-fact-35-truncate-in-python/
 				math.ceil(max_count / self.page_limit),
 				origin_timestamp,
-				'\n'.join(self.show_query_msg_result(x) for x in sqlObj)
+				'\n'.join(self.show_query_msg_result(x) for x in sqlObj),
+				time.time() - timediff
 			), max_count
 		return '404 Not found', 0
 
@@ -842,6 +845,8 @@ class bot_search_helper(object):
 		]
 		if sqlObj['from_user'] == sqlObj['chat_id']:
 			kb[-1].pop(-1)
+		if sqlObj['chat_id'] < 0:
+			kb.append([InlineKeyboardButton(text = 'Goto message', url = f'https://t.me/c/{str(sqlObj["chat_id"])[4:]}/{sqlObj["message_id"]}')])
 		return InlineKeyboardMarkup( inline_keyboard = kb)
 
 	def refresh_settings(self, msg: Message):
