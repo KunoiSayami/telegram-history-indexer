@@ -191,7 +191,7 @@ class bot_search_helper(object):
 
 		# MessageHandler For groups
 		self.bot.add_handler(MessageHandler(self.handle_join_group, Filters.new_chat_members))
-		self.bot.add_handler(MessageHandler(self.handle_query_edits, Filters.group & Filters.command('edits')))
+		self.bot.add_handler(MessageHandler(self.handle_query_edits, Filters.group & Filters.text))
 
 		# MessageHandler For query
 		self.bot.add_handler(MessageHandler(self.handle_search_user, Filters.private & Filters.user(self.owner) & Filters.command('su')))
@@ -221,11 +221,12 @@ class bot_search_helper(object):
 		sqlObj = self.conn.query1("SELECT * FROM `index` WHERE `chat_id` = %s AND `message_id` = %s", (d.chat_id, d.message_id))
 		if sqlObj is None:
 			return ''
-		return '[ORI] <code>{0}</code> (<code>{1}</code>): <pre>{2}</pre>\n[EDITED] <code>{3}</code> (<code>{4}</code>): <pre>{5}</pre>'.format(
+		return '<b>[ORI]</b> <code>{0}</code> (<code>{1}</code>): <pre>{2}</pre>\n<b>[EDITED]</b> <code>{3}</code> (<code>{4}</code>): <pre>{5}</pre>'.format(
 			self.user_cache.get(d.from_user, True), d.timestamp, d.text, self.user_cache.get(sqlObj['from_user'], True), sqlObj['timestamp'], sqlObj['text']
 		)
 
 	def handle_query_edits(self, _client: Client, msg: Message):
+		if not msg.text.startswith('/edits'): return
 		if not self.edit_queue_lock.acquire(False):
 			return msg.reply('Another query in progress, please wait a moment')
 		try:
@@ -396,7 +397,7 @@ class bot_search_helper(object):
 				_msg = client.send_photo(msg.chat.id, './downloads/user.jpg', self.generate_user_info(sqlObj), 'html')
 				self.conn.execute(
 					"INSERT INTO `media_cache` (`id`, `file_id`) VALUE (%s, %s)",
-					(sqlObj['photo_id'], _msg.photo.sizes[-1].file_id)
+					(sqlObj['photo_id'], _msg.photo.file_id)
 				)
 				os.remove('./downloads/user.jpg')
 
@@ -655,7 +656,7 @@ class bot_search_helper(object):
 		if sqlObj is None:
 			return msg.reply('404 Search index not found')
 		step = self.STEP.search(msg.reply_to_message.text).group(1)
-		kb = self._query_history(eval(sqlObj['args']), _index, (int(step) - 1) * self.page_limit, sqlObj['timestamp'], max_count = sqlObj['max_count'], callback = self.generate_select_keyboard)
+		kb = self._query_history(_index, eval(sqlObj['args']), (int(step) - 1) * self.page_limit, sqlObj['timestamp'], max_count = sqlObj['max_count'], callback = self.generate_select_keyboard)
 		if isinstance(kb, tuple): return
 		msg.reply('Please select a message:', True, reply_markup = kb)
 
@@ -716,8 +717,8 @@ class bot_search_helper(object):
 		r = self.generate_user_info(userObj)
 		if sqlObj['chat_id'] != sqlObj['from_user']:
 			chatObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (sqlObj['chat_id'],))
-			r += f'\nChat:{self.generate_user_info(chatObj)}'
-		return f'Message Details:\nFrom User:\n{r}\n\n{self.show_query_msg_result(sqlObj)}'
+			r += f'\n<i>Chat</i>:\n{self.generate_user_info(chatObj)}'
+		return f'<b>Message Details</b>:\n<i>From User</i>:\n{r}\n\n{self.show_query_msg_result(sqlObj)}'
 
 	def handle_page_select(self, datagroup: list, msg: CallbackQuery):
 		if datagroup[1] in ('n', 'b', 'r'):
