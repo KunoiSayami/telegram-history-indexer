@@ -26,12 +26,13 @@ import time
 import datetime
 import traceback
 import threading
-from type_user import user_profile
+from type_custom import user_profile
 import logging
 import hashlib
+from configparser import ConfigParser
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
+logger.setLevel(logging.DEBUG)
 
 class fake_notify_class(object):
 	def send(self):
@@ -96,8 +97,7 @@ class msg_tracker_thread_class(Thread):
 		_type = self.get_msg_type(msg)
 		if _type == 'error':
 			if text == '': return
-			else:
-				_type = 'text'
+			_type = 'text'
 		
 		if msg.edit_date is not None:
 			sqlObj = self.conn.query1("SELECT `_id`, `text` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
@@ -203,11 +203,16 @@ class msg_tracker_thread_class(Thread):
 		self.insert_username(user)
 		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user.id)
 		profileObj = user_profile(user)
+		try:
+			peer_id = self.client.resolve_peer(profileObj.user_id).access_hash
+			print(repr(peer_id))
+		except (KeyError, pyrogram.errors.RPCError, AttributeError):
+			peer_id = None
 		if sqlObj is None:
 			is_bot = isinstance(user, User) and user.is_bot
 			is_group = user.id < 0
 			self.conn.execute(
-				"INSERT INTO `user_index` (`user_id`, `first_name`, `last_name`, `photo_id`, `hash`, `is_bot`, `is_group`) VALUE (%s, %s, %s, %s, %s, %s, %s)",
+				"INSERT INTO `user_index` (`user_id`, `first_name`, `last_name`, `photo_id`, `hash`, `is_bot`, `is_group`, `peer_id`) VALUE (%s, %s, %s, %s, %s, %s, %s, %s)",
 				(
 					profileObj.user_id,
 					profileObj.first_name,
@@ -215,19 +220,23 @@ class msg_tracker_thread_class(Thread):
 					profileObj.photo_id,
 					profileObj.hash,
 					'Y' if is_bot else 'N',
-					'Y' if is_group else 'N'
+					'Y' if is_group else 'N',
+					peer_id,
 				)
 			)
 			self.conn.execute(*profileObj.sql_insert)
 			return True
-		elif profileObj.hash != sqlObj['hash']:
+		if peer_id != sqlObj['peer_id']:
+			self.conn.execute("UPDATE `user_index` SET `peer_id` = %s WHERE `user_id` = %s", (peer_id, profileObj.user_id))
+		if profileObj.hash != sqlObj['hash']:
 			self.conn.execute(
-				"UPDATE `user_index` SET `first_name` = %s, `last_name` = %s, `photo_id` = %s, `hash` = %s, `timestamp` = CURRENT_TIMESTAMP() WHERE `user_id` = %s",
+				"UPDATE `user_index` SET `first_name` = %s, `last_name` = %s, `photo_id` = %s, `hash` = %s, `peer_id` = %s `timestamp` = CURRENT_TIMESTAMP() WHERE `user_id` = %s",
 				(
 					profileObj.first_name,
 					profileObj.last_name,
 					profileObj.photo_id,
 					profileObj.hash,
+					peer_id,
 					profileObj.user_id,
 				)
 			)
