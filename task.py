@@ -18,18 +18,16 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from queue import Queue
-from libpy3.mysqldb import mysqldb, pymysql
-from threading import Thread
-from pyrogram import Client, Message, User, Chat
-import pyrogram
 import time
 import datetime
+import logging
 import traceback
 import threading
-from type_custom import user_profile
-import logging
 import hashlib
-from configparser import ConfigParser
+import pyrogram
+from pyrogram import Client, Message, User, Chat
+from libpy3.mysqldb import mysqldb, pymysql
+from type_custom import user_profile
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -75,7 +73,7 @@ class msg_tracker_thread_class(Thread):
 
 	def start(self):
 		logger.debug('Starting `msg_tracker_thread_class\'')
-		Thread(target = self.user_tracker, daemon = True).start()
+		threading.Thread(target = self.user_tracker, daemon = True).start()
 		threading.Thread.start(self)
 		logger.debug('Start `msg_tracker_thread_class\' successful')
 
@@ -96,7 +94,8 @@ class msg_tracker_thread_class(Thread):
 		
 		_type = self.get_msg_type(msg)
 		if _type == 'error':
-			if text == '': return
+			if text == '':
+				return
 			_type = 'text'
 		
 		if msg.edit_date is not None:
@@ -104,7 +103,8 @@ class msg_tracker_thread_class(Thread):
 					'document_' if _type != 'text' else ''
 				), (msg.chat.id, msg.message_id))
 			if sqlObj is not None:
-				if text == sqlObj['text']: return
+				if text == sqlObj['text']:
+					return
 				self.conn.execute("UPDATE `{}index` SET `text` = %s WHERE `_id` = %s".format(
 						'document_' if _type != 'text' else ''
 					), (text, sqlObj['_id']))
@@ -147,12 +147,31 @@ class msg_tracker_thread_class(Thread):
 			)
 		logger.debug('INSERT INTO `index` %d %d %s', msg.chat.id, msg.message_id, text)
 
+	def _insert_delete_record(self, chat_id: int, msgs: list):
+		sz = [[chat_id, x] for x in msgs]
+		self.conn.execute("INSERT INTO `deleted_message` (`chat_id`, `message_id`) VALUES (%s, %s)" , sz, True)
+
+	def insert_delete_record(self, update: pyrogram.api.types.UpdateDeleteMessages):
+		if isinstance(update, pyrogram.api.types.UpdateDeleteMessages):
+			for x in update.messages:
+				sqlObj = self.conn.query1("SELECT `chat_id` FROM `index` WHERE `message_id` = %s", x)
+				if sqlObj:
+					break
+			if sqlObj:
+				self._insert_delete_record(sqlObj['chat_id'], update.messages)
+				return True
+		if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
+			self._insert_delete_record(update.channel_id, update.messages)
+			return True
+		return False
+
+
 	def filter_msg(self):
 		while not self.msg_queue.empty():
 			msg = self.msg_queue.get_nowait()
-			if isinstance(msg, pyrogram.api.types.UpdateDeleteChannelMessages):
-				sz = [[msg.channel_id, x] for x in msg.messages]
-				self.conn.execute("INSERT INTO `deleted_message` (`chat_id`, `message_id`) VALUES (%s, %s)", sz, True)
+			if self.insert_delete_record(msg):
+				continue
+			if self.filter_func(msg):
 				continue
 			if self.filter_func(msg): continue
 			try:
@@ -251,9 +270,9 @@ class msg_tracker_thread_class(Thread):
 			return self._real_user_index(u)
 		return False
 
-	def push(self, msg: Message):
+	def push(self, msg: Message, no_user: bool = False):
 		self.msg_queue.put_nowait(msg)
-		if isinstance(msg, pyrogram.api.types.UpdateDeleteChannelMessages): return
+		if no_user: return
 		users = [x.raw for x in list(set(user_profile(x) for x in [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat, msg.via_bot]))]
 		users.remove(None)
 		for x in users:

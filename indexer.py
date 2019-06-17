@@ -106,7 +106,9 @@ class history_index_class(object):
 
 	def handle_raw_update(self, _client: Client, update: Update, *_args):
 		if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
-			self.trackers.push(update)
+			self.trackers.push(update, True)
+		if isinstance(update, pyrogram.api.types.UpdateDeleteMessages):
+			self.trackers.push(update, True)
 
 	def pre_process(self, _: Client, msg: Message):
 		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
