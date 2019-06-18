@@ -26,6 +26,7 @@ from spider import iter_user_messages
 import logging
 import task
 import time
+import os
 
 class history_index_class(object):
 	def __init__(self, client: Client = None, conn: mysqldb = None, other_client: Client or bool = None):
@@ -138,6 +139,10 @@ class history_index_class(object):
 				self.client.forward_messages('self', int(args[1]), int(args[2]), True)
 			elif msg.text.startswith('/MagicGet'):
 				self.client.send_cached_media(msg.chat.id, args[1], f'/cache `{args[1]}`')
+			elif msg.text.startswith('/MagicDownload'):
+				self.client.download_media(args[1], 'avatar.jpg')
+				msg.reply_photo('downloads/avatar.jpg', False, f'/cache {" ".join(args[1:])}')
+				os.remove('./downloads/avatar.jpg')
 		except pyrogram.errors.RPCError:
 			self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
 
@@ -145,9 +150,12 @@ class history_index_class(object):
 		if self._init:
 			self.conn.close()
 
+	def idle(self):
+		return self.client.idle()
+
 	def handle_disconnect(self, _client: Client):
-		if self._init:
-			self.conn.close()
+		#if self._init:
+		#	self.conn.close()
 		self.logger.debug('Disconnecting...')
 		if self.trackers.emergency_mode:
 			self.logger.warning('Emergency mode enabled! Wait more time to finish write.')

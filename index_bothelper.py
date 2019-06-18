@@ -20,7 +20,7 @@
 from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
 from pyrogram import Client, Message, MessageHandler, Filters, CallbackQueryHandler, CallbackQuery,\
-	InlineKeyboardMarkup, InlineKeyboardButton, DisconnectHandler
+	InlineKeyboardMarkup, InlineKeyboardButton, DisconnectHandler, ContinuePropagation
 import hashlib
 import warnings
 import threading
@@ -201,7 +201,8 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_close_keyboard, Filters.private & Filters.user(self.owner) & Filters.command('close')))
 		self.bot.add_handler(MessageHandler(self.handle_select_message, Filters.private & Filters.user(self.owner) & Filters.command('select')))
 		self.bot.add_handler(MessageHandler(self.handle_get_document, Filters.private & Filters.user(self.owner) & Filters.command('get')))
-		self.bot.add_handler(MessageHandler(self.handle_insert_cache, Filters.private & Filters.user(self.owner) & Filters.photo & Filters.command('cache')))
+		self.bot.add_handler(MessageHandler(self.handle_continue_user_request, Filters.private & Filters.user(self.owner) & Filters.photo & Filters.command('cache')))
+		self.bot.add_handler(MessageHandler(self.handle_insert_cache, Filters.private & Filters.user(self.owner) & Filters.command('cache')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
 
 		# MessageHandler For media
@@ -239,12 +240,17 @@ class bot_search_helper(object):
 		step = 0
 		timediff = time.time()
 		while len(edits_set) < 3:
-			sqlObj = self.conn.query(f"SELECT * FROM `edit_history` WHERE `chat_id` = %s ORDER BY `timestamp` DESC LIMIT {step}, {3 - len(edits_set)}", msg.chat.id)
+			sqlObj = self.conn.query(
+				f"SELECT * FROM `edit_history` WHERE `chat_id` = %s ORDER BY `timestamp` DESC LIMIT {step}, {3 - len(edits_set)}",
+				msg.chat.id
+			)
 			if sqlObj is None: break
 			step += len(sqlObj) - 1
 			for msgs in sqlObj:
 				edits_set.add(hashmsg(**msgs))
-		msg.reply("%s\n\nTime spend: %.2fs" % ('\n\n'.join(list(set([self.query_current_messages(x) for x in edits_set]))), time.time() - timediff), parse_mode = 'html')
+		msg.reply("%s\n\nTime spend: %.2fs" % (
+				'\n\n'.join(list(set([self.query_current_messages(x) for x in edits_set]))), time.time() - timediff
+			), parse_mode = 'html')
 
 	def handle_close_keyboard(self, _client: Client, msg: Message):
 		if msg.reply_to_message.from_user.is_self:
@@ -256,7 +262,7 @@ class bot_search_helper(object):
 	def handle_join_group(self, client: Client, msg: Message):
 		if any(x.id == self.bot_id for x in msg.new_chat_members) and msg.from_user.id != self.owner:
 			client.leave_chat(msg.chat.id)
-			print(f'Left chat {msg.chat.title}({msg.chat.id})')
+			logger.warning(f'Left chat {msg.chat.title}({msg.chat.id})')
 
 	def handle_setting(self, _client: Client, msg: Message):
 		msggroup = msg.text.split()
@@ -389,18 +395,11 @@ class bot_search_helper(object):
 		) for sqlObj in sqlObjx)
 
 	def send_photo(self, client: Client, msg: Message, sqlObj: dict):
-		with self.search_lock:
-			_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `id` = %s", (sqlObj['photo_id'],))
-			if _sqlObj:
-				client.send_photo(msg.chat.id, _sqlObj['file_id'], self.generate_user_info(sqlObj), 'html')
-			else:
-				client.download_media(sqlObj['photo_id'], 'user.jpg')
-				_msg = client.send_photo(msg.chat.id, './downloads/user.jpg', self.generate_user_info(sqlObj), 'html')
-				self.conn.execute(
-					"INSERT INTO `media_cache` (`id`, `file_id`) VALUE (%s, %s)",
-					(sqlObj['photo_id'], _msg.photo.file_id)
-				)
-				os.remove('./downloads/user.jpg')
+		_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `id` = %s", (sqlObj['photo_id'],))
+		if _sqlObj:
+			client.send_photo(msg.chat.id, _sqlObj['file_id'], self.generate_user_info(sqlObj), 'html')
+		else:
+			msg.reply(f'/MagicDownload {sqlObj["photo_id"]} {sqlObj["user_id"]}', False)
 
 	def _insert_cache(self, file_id: str, bot_file_id: str):
 		_sqlObj = self.conn.query1("SELECT `file_id` FROM `media_cache` WHERE `id` = %s", (file_id,))
@@ -415,13 +414,12 @@ class bot_search_helper(object):
 			return _sqlObj
 
 	def handle_accurate_search_user(self, client: Client, msg: Message):
-		args = msg.text.split()
-		if len(args) != 2:
+		if len(msg.command) != 2:
 			return msg.reply('Please use `/ua <user_id>` to search database', True)
-		self._handle_accurate_search_user(client, msg, args)
+		self._handle_accurate_search_user(client, msg, msg.command)
 
 	def _handle_accurate_search_user(self, client: Client, msg: Message, args: list):
-		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", args[1:])
+		sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", (args[1],))
 		if sqlObj is None:
 			return msg.reply('Sorry, We can\'t found this user.', True)
 		if sqlObj['photo_id']:
@@ -488,9 +486,17 @@ class bot_search_helper(object):
 			)
 		)
 
+	def handle_continue_user_request(self, client: Client, msg: Message):
+		if len(msg.command) <= 2:
+			raise ContinuePropagation
+		msg.delete()
+		self._insert_cache(msg.command[1], msg.photo.file_id)
+		msg.command.pop(1)
+		self._handle_accurate_search_user(client, msg, msg.command)
+
 	def handle_insert_cache(self, client: Client, msg: Message):
 		msg.delete()
-		file_id = msg, task.msg_tracker_thread_class.get_file_id(msg, task.msg_tracker_thread_class.get_msg_type(msg))
+		file_id = task.msg_tracker_thread_class.get_file_id(msg, task.msg_tracker_thread_class.get_msg_type(msg))
 		self._insert_cache(msg.command[1], file_id)
 		client.send_cached_media(msg.chat.id, file_id, f'`{msg.command[1]}`')
 		client.send_chat_action(msg.chat.id, 'cancel')
@@ -775,6 +781,8 @@ class bot_search_helper(object):
 
 		if datagroup[0] in ('msg', 'doc'):
 			if not self.update_lock.acquire(False): return msg.answer('You click too fast!')
+			if datagroup[1] == 'r':
+				msg.answer('Please wait...', cache_time = 10)
 			try:
 				self.handle_page_select(datagroup, msg)
 			finally:
