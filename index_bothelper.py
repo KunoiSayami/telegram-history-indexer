@@ -218,7 +218,7 @@ class bot_search_helper(object):
 		self.bot.start()
 		logger.info('Bot started succesful')
 
-	def query_current_messages(self, d: hashmsg):
+	def _query_current_messages(self, d: hashmsg):
 		sqlObj = self.conn.query1("SELECT * FROM `index` WHERE `chat_id` = %s AND `message_id` = %s", (d.chat_id, d.message_id))
 		if sqlObj is None:
 			return ''
@@ -227,13 +227,18 @@ class bot_search_helper(object):
 		)
 
 	def handle_query_edits(self, _client: Client, msg: Message):
-		if not msg.text.startswith('/edits'): return
+		if not msg.text.startswith('/edits'):
+			raise ContinuePropagation
 		if not self.edit_queue_lock.acquire(False):
 			return msg.reply('Another query in progress, please wait a moment')
 		try:
 			self._handle_query_edits(msg)
 		finally:
 			self.edit_queue_lock.release()
+
+	def query_current_messages(self, edits: list):
+		edits = sorted(edits, operator.attrgetter('timestamp'), True)
+		return [self._query_current_messages(x) for x in edits]
 
 	def _handle_query_edits(self, msg: Message):
 		edits_set = set()
@@ -249,7 +254,7 @@ class bot_search_helper(object):
 			for msgs in sqlObj:
 				edits_set.add(hashmsg(**msgs))
 		msg.reply("%s\n\nTime spend: %.2fs" % (
-				'\n\n'.join(list(set([self.query_current_messages(x) for x in edits_set]))), time.time() - timediff
+				'\n\n'.join(self.query_current_messages(list(edits_set))), time.time() - timediff
 			), parse_mode = 'html')
 
 	def handle_close_keyboard(self, _client: Client, msg: Message):
