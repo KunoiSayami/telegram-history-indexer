@@ -77,8 +77,8 @@ class sql_cache_thread(threading.Thread):
 			logger.debug('Cache_obj => %s', repr(cache_obj))
 			if cache_obj.cache is not None:
 				logger.debug('Starting #%d cache', cache_obj.cache_id)
-				self.conn.execute("UPDATE `query_result_cache` SET `cache` = %s, `cache_hash` = %s WHERE `_id` = %s", (
-					cache_obj.cache, cache_obj.settings_hash, cache_obj.cache_id
+				self.conn.execute("UPDATE `query_result_cache` SET `cache` = %s, `cache_hash` = %s, `step` = %s WHERE `_id` = %s", (
+					cache_obj.cache, cache_obj.settings_hash, cache_obj.step, cache_obj.cache_id
 				))
 				logger.debug('Update #%d cache', cache_obj.cache_id)
 			elif cache_obj.step is not None:
@@ -571,7 +571,7 @@ class bot_search_helper(object):
 			if lower_limit < 0:
 				lower_limit = 0
 			sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {lower_limit}, {10 * self.PAGE_MAX}", args)
-			self.query_cache.push(type_sql_cache(cache_index, cache = repr(sqlObj), settings_hash = self.settings_hash()))
+			self.query_cache.push(type_sql_cache(cache_index, cache = repr(sqlObj), step = lower_limit, settings_hash = self.settings_hash()))
 		else:
 			sqlObj = eval(cache)
 			if step > 2 * self.PAGE_MAX and abs((cache_step + 5 * self.PAGE_MAX) - step) > 4 * self.PAGE_MAX:
@@ -597,9 +597,9 @@ class bot_search_helper(object):
 		timediff = time.time()
 		optionsStr, args, origin_timestamp = self.generate_sql_options(original_args, timestamp, _type)
 
-		force_update = max_count is None
+		force_update = (max_count is None) or self.force_query
 
-		if max_count is None:
+		if max_count is None or self.force_query:
 			max_count = self.conn.query1(f"SELECT COUNT(*) AS `count` FROM `{table}` WHERE {optionsStr}", args)['count']
 
 		sqlObj = self.__cache_query(int(cache_index), step, optionsStr, args, table, force_update)

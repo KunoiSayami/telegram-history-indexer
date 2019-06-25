@@ -86,7 +86,8 @@ class history_index_class(object):
 			self.conn,
 			self.check_filter,
 			notify = task.notify_class(self.other_client, self.owner),
-			other_client = self.other_client
+			other_client = self.other_client,
+			media_send_target = config['account']['media_send_target']
 		)
 
 		self.client.add_handler(MessageHandler(self.pre_process), 888)
@@ -139,6 +140,9 @@ class history_index_class(object):
 				self.client.forward_messages('self', int(args[1]), int(args[2]), True)
 			elif msg.text.startswith('/MagicGet'):
 				self.client.send_cached_media(msg.chat.id, args[1], f'/cache `{args[1]}`')
+			elif msg.text.startswith('/MagicForceMapping'):
+				if self.trackers.media_thread:
+					self.trackers.media_thread.force_start = True
 			elif msg.text.startswith('/MagicDownload'):
 				self.client.download_media(args[1], 'avatar.jpg')
 				msg.reply_photo('downloads/avatar.jpg', False, f'/cache {" ".join(args[1:])}')

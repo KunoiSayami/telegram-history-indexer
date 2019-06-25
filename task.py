@@ -25,6 +25,7 @@ import traceback
 import threading
 import hashlib
 import pyrogram
+import os
 from pyrogram import Client, Message, User, Chat
 from libpy3.mysqldb import mysqldb, pymysql
 from type_custom import user_profile
@@ -32,11 +33,11 @@ from type_custom import user_profile
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-class fake_notify_class(object):
+class fake_notify_class:
 	def send(self):
 		pass
 
-class notify_class(object):
+class notify_class:
 	def __init__(self, client: Client, target: int, interval: int = 60):
 		self.client = client
 		self.target = target
@@ -53,28 +54,110 @@ class notify_class(object):
 			self.last_send = time.time()
 		return True
 
-class msg_tracker_thread_class(Thread):
-	def __init__(self, client: Client, conn: mysqldb, filter_func: 'callable', *, notify: notify_class = None, other_client: Client = None):
-		Thread.__init__(self, daemon = True)
+class profile_photo_cache_class(threading.Thread):
+	def __init__(self, client: Client, conn: mysqldb, media_send_target: int):
+		threading.Thread.__init__(self, daemon = True)
+		self.client = client
+		self.conn = conn
+		self.media_send_target = media_send_target
+		self.queue = Queue()
+		self.r_queue = Queue()
+		self.force_start = False
+
+	def start(self):
+		threading.Thread(target = self._do_get_loop, daemon = True).start()
+		threading.Thread.start(self)
+
+	def run(self):
+		logger.debug('`profile_photo_cache_class\' Thread started!')
+		while not self.client.is_started: time.sleep(0.01)
+		while self.client.is_started:
+			if not self.queue.empty():
+				self.exc_sql()
+			dt = datetime.datetime.now()
+			if (self.force_start or (dt.hour == 10 and dt.minute == 0)) and \
+				self.conn.query1("SELECT * FROM `pending_mapping` LIMIT 1"):
+				self.force_start = False
+				self.do_get_loop()
+			time.sleep(1)
+
+	def exc_sql(self):
+		try:
+			file_ids = []
+			while not self.queue.empty():
+				file_id = self.queue.get_nowait()
+				if self.conn.query1("SELECT * FROM `pending_mapping` WHERE `file_id` = %s", file_id): continue
+				if self.conn.query1("SELECT * FROM `media_cache` WHERE `id` = %s", file_id): continue
+				file_ids.append(file_id)
+			if len(file_ids):
+				self.conn.execute("INSERT INTO `pending_mapping` (`file_id`) VALUES (%s)", file_ids, len(file_ids) > 1)
+		except:
+			traceback.print_exc()
+
+	def _do_get_loop(self):
+		logger.debug('`_do_get_loop\' Thread started!')
+		while not self.client.is_started: time.sleep(0.01)
+		while self.client.is_started:
+			while self.r_queue.empty():
+				time.sleep(1)
+			self._do_forward()
+
+	def _do_forward(self):
+		while not self.r_queue.empty():
+			file_id = self.r_queue.get_nowait()
+			try:
+				self.client.download_media(file_id, 'pendingcache.jpg')
+				self.client.send_photo(self.media_send_target, 'downloads/pendingcache.jpg', file_id, disable_notification=True)
+			except pyrogram.errors.FloodWait as e:
+				time.sleep(e.x)
+			except pyrogram.errors.RPCError:
+				traceback.print_exc()
+			finally:
+				time.sleep(0.5)
+			logger.debug('send successful %s', file_id)
+			os.remove('./downloads/pendingcache.jpg')
+
+	def do_get_loop(self):
+		logger.debug('Calling `do_get_loop\'')
+		count = self.conn.query1("SELECT COUNT(*) AS `count` FROM `pending_mapping`")['count'] - 1
+		if count < 200:
+			for offset in range(0, count, 10):
+				sqlObj = self.conn.query("SELECT * FROM `pending_mapping` LIMIT %s, 10", offset)
+				for x in sqlObj:
+					self.r_queue.put_nowait(x['file_id'])
+		else:
+			logger.debug('Pending mapping count is more then 200 (%d), jump over it', count)
+		self.conn.execute("TRUNCATE `pending_mapping`")
+		self.conn.commit()
+
+	def push(self, file_id: str):
+		self.queue.put_nowait(file_id)
+
+class msg_tracker_thread_class(threading.Thread):
+	def __init__(self, client: Client, conn: mysqldb, filter_func: 'callable', *, notify: notify_class = None, other_client: Client = None, media_send_target: int = 0):
+		threading.Thread.__init__(self, daemon = True)
 
 		self.msg_queue = Queue()
 		self.user_queue = Queue()
 		self.client = client
 		self.conn = conn
+		self.media_send_target = media_send_target
 		self.other_client = other_client
 		self.filter_func = filter_func
 		if self.other_client is None:
 			self.other_client = self.client
+		if media_send_target != 0:
+			self.media_thread = profile_photo_cache_class(client, conn, media_send_target)
 		self.notify = notify
 		if self.notify is None:
 			self.notify = fake_notify_class()
-		
 		self.emergency_mode = False
 
 	def start(self):
 		logger.debug('Starting `msg_tracker_thread_class\'')
 		threading.Thread(target = self.user_tracker, daemon = True).start()
 		threading.Thread.start(self)
+		self.media_thread.start()
 		logger.debug('Start `msg_tracker_thread_class\' successful')
 
 	def run(self):
@@ -91,13 +174,13 @@ class msg_tracker_thread_class(Thread):
 
 		if text.startswith('/') and not text.startswith('//'):
 			return
-		
+
 		_type = self.get_msg_type(msg)
 		if _type == 'error':
 			if text == '':
 				return
 			_type = 'text'
-		
+
 		if msg.edit_date is not None:
 			sqlObj = self.conn.query1("SELECT `_id`, `text` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
 					'document_' if _type != 'text' else ''
@@ -120,13 +203,19 @@ class msg_tracker_thread_class(Thread):
 					)
 				return
 
+		if msg.forward_sender_name:
+			sqlObj = self.conn.query1("SELECT `user_id` FROM `user_history` WHERE `full_name` LIKE %s LIMIT 1", (msg.forward_sender_name,))
+			forward_from_id = sqlObj['user_id'] if sqlObj else -1001228946795
+		else:
+			forward_from_id = msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
+
 		self.conn.execute(
 			"INSERT INTO `index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUE (%s, %s, %s, %s, %s, %s)",
 			(
 				msg.chat.id,
 				msg.message_id,
 				msg.from_user.id if msg.from_user else msg.chat.id,
-				msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
+				forward_from_id,
 				text,
 				datetime.datetime.fromtimestamp(msg.date)
 			)
@@ -138,7 +227,7 @@ class msg_tracker_thread_class(Thread):
 						msg.chat.id,
 						msg.message_id,
 						msg.from_user.id if msg.from_user else msg.chat.id,
-						msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
+						forward_from_id,
 						text if len(text) > 0 else None,
 						datetime.datetime.fromtimestamp(msg.date),
 						_type,
@@ -153,18 +242,18 @@ class msg_tracker_thread_class(Thread):
 
 	def insert_delete_record(self, update: pyrogram.api.types.UpdateDeleteMessages):
 		if isinstance(update, pyrogram.api.types.UpdateDeleteMessages):
+			sqlObj = None
 			for x in update.messages:
 				sqlObj = self.conn.query1("SELECT `chat_id` FROM `index` WHERE `message_id` = %s", x)
 				if sqlObj:
 					break
 			if sqlObj:
 				self._insert_delete_record(sqlObj['chat_id'], update.messages)
-				return True
+			return True
 		if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
-			self._insert_delete_record(update.channel_id, update.messages)
+			self._insert_delete_record(-(update.channel_id + 1000000000000), update.messages)
 			return True
 		return False
-
 
 	def filter_msg(self):
 		while not self.msg_queue.empty():
@@ -173,12 +262,12 @@ class msg_tracker_thread_class(Thread):
 				continue
 			if self.filter_func(msg):
 				continue
-			if self.filter_func(msg): continue
 			try:
 				self._filter_msg(msg)
 			except:
 				self.emergency_mode = True
 				self.notify.send(traceback.format_exc())
+				traceback.print_exc()
 			else:
 				self.emergency_mode = False
 			if self.emergency_mode:
@@ -224,7 +313,6 @@ class msg_tracker_thread_class(Thread):
 		profileObj = user_profile(user)
 		try:
 			peer_id = self.client.resolve_peer(profileObj.user_id).access_hash
-			print(repr(peer_id))
 		except (KeyError, pyrogram.errors.RPCError, AttributeError):
 			peer_id = None
 		if sqlObj is None:
@@ -244,12 +332,13 @@ class msg_tracker_thread_class(Thread):
 				)
 			)
 			self.conn.execute(*profileObj.sql_insert)
+			if profileObj.photo_id: self.media_thread.push(profileObj.photo_id)
 			return True
 		if peer_id != sqlObj['peer_id']:
 			self.conn.execute("UPDATE `user_index` SET `peer_id` = %s WHERE `user_id` = %s", (peer_id, profileObj.user_id))
 		if profileObj.hash != sqlObj['hash']:
 			self.conn.execute(
-				"UPDATE `user_index` SET `first_name` = %s, `last_name` = %s, `photo_id` = %s, `hash` = %s, `peer_id` = %s `timestamp` = CURRENT_TIMESTAMP() WHERE `user_id` = %s",
+				"UPDATE `user_index` SET `first_name` = %s, `last_name` = %s, `photo_id` = %s, `hash` = %s, `peer_id` = %s, `timestamp` = CURRENT_TIMESTAMP() WHERE `user_id` = %s",
 				(
 					profileObj.first_name,
 					profileObj.last_name,
@@ -260,6 +349,7 @@ class msg_tracker_thread_class(Thread):
 				)
 			)
 			self.conn.execute(*profileObj.sql_insert)
+			if profileObj.photo_id: self.media_thread.push(profileObj.photo_id)
 			return True
 		elif enable_request and (datetime.datetime.now() - sqlObj['last_refresh']).total_seconds() > 3600:
 			if isinstance(user, User):
@@ -286,7 +376,7 @@ class msg_tracker_thread_class(Thread):
 			'document' if msg.document else \
 			'text' if msg.text else \
 			'voice' if msg.voice else 'error'
-	
+
 	@staticmethod
 	def get_file_id(msg: Message, _type: str):
 		return getattr(msg, _type).file_id

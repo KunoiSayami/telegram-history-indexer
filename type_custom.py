@@ -60,21 +60,23 @@ class user_profile(simple_user_profile):
 
 		if isinstance(user, User):
 			self.sql_insert = (
-				"INSERT INTO `user_history` (`user_id`, `first_name`, `last_name`, `photo_id`) VALUE (%s, %s, %s, %s)",
+				"INSERT INTO `user_history` (`user_id`, `first_name`, `last_name`, `full_name`, `photo_id`) VALUE (%s, %s, %s, %s, %s)",
 				(
 					self.user_id,
 					#self.username,
 					self.first_name,
 					self.last_name,
+					self.full_name,
 					self.photo_id,
 				)
 			)
 		else:
 			self.sql_insert = (
-				"INSERT INTO `user_history` (`user_id`, `first_name` , `photo_id`) VALUE (%s, %s, %s)",
+				"INSERT INTO `user_history` (`user_id`, `first_name`, `full_name`, `photo_id`) VALUE (%s, %s, %s, %s)",
 				(
 					self.user_id,
 					#self.username,
+					self.full_name,
 					self.full_name,
 					self.photo_id,
 				)
