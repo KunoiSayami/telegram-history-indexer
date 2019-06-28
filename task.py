@@ -92,7 +92,7 @@ class profile_photo_cache_class(threading.Thread):
 			if len(file_ids):
 				self.conn.execute("INSERT INTO `pending_mapping` (`file_id`) VALUES (%s)", file_ids, len(file_ids) > 1)
 		except:
-			traceback.print_exc()
+			logger.exception('Error while insert sql')
 
 	def _do_get_loop(self):
 		logger.debug('`_do_get_loop\' Thread started!')
@@ -108,14 +108,16 @@ class profile_photo_cache_class(threading.Thread):
 			try:
 				self.client.download_media(file_id, 'pendingcache.jpg')
 				self.client.send_photo(self.media_send_target, 'downloads/pendingcache.jpg', file_id, disable_notification=True)
+			except pyrogram.errors.exceptions.bad_request_400.FileIdInvalid:
+				logger.error('The file_id: %s is invalid', file_id)
 			except pyrogram.errors.FloodWait as e:
 				time.sleep(e.x)
 			except pyrogram.errors.RPCError:
-				traceback.print_exc()
+				logger.exception('Got other RPCError: ')
 			finally:
 				time.sleep(0.5)
 			logger.debug('send successful %s', file_id)
-			os.remove('./downloads/pendingcache.jpg')
+		os.remove('./downloads/pendingcache.jpg')
 
 	def do_get_loop(self):
 		logger.debug('Calling `do_get_loop\'')
@@ -170,6 +172,11 @@ class msg_tracker_thread_class(threading.Thread):
 			self.conn.commit()
 
 	def _filter_msg(self, msg: Message):
+		if msg.new_chat_members:
+			self.conn.execute("INSERT INTO `group_history` (`chat_id`, `user_id`, `message_id`, `timestamp`) VALUES (%s, %s, %s, %s)",
+				[[msg.chat.id, x.id, msg.message_id, msg.date] for x in msg.new_chat_members], True)
+			return
+
 		text = msg.text if msg.text else msg.caption if msg.caption else ''
 
 		if text.startswith('/') and not text.startswith('//'):
@@ -294,7 +301,7 @@ class msg_tracker_thread_class(threading.Thread):
 			except:
 				self.emergency_mode = True
 				traceback.print_exc()
-				print(u)
+				logger.debug('User Object detail => %s', str(u))
 			if self.emergency_mode:
 				self.emergency_write(u)
 
@@ -431,3 +438,4 @@ class check_dup(threading.Thread):
 	@staticmethod
 	def get_hash(sqlObj: dict):
 		return hashlib.sha256(' '.join(map(str, (sqlObj['chat_id'], sqlObj['message_id'], sqlObj['from_user']))).encode()).hexdigest()
+
