@@ -174,7 +174,7 @@ class msg_tracker_thread_class(threading.Thread):
 	def _filter_msg(self, msg: Message):
 		if msg.new_chat_members:
 			self.conn.execute("INSERT INTO `group_history` (`chat_id`, `user_id`, `message_id`, `timestamp`) VALUES (%s, %s, %s, %s)",
-				[[msg.chat.id, x.id, msg.message_id, msg.date] for x in msg.new_chat_members], True)
+				[[msg.chat.id, x.id, msg.message_id, datetime.datetime.fromtimestamp(msg.date)] for x in msg.new_chat_members], True)
 			return
 
 		text = msg.text if msg.text else msg.caption if msg.caption else ''
