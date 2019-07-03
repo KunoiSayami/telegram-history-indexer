@@ -36,8 +36,8 @@ class history_index_class(object):
 		config = ConfigParser()
 		config.read('config.ini')
 
-		self.filter_chat = [x for x in map(int, config['filters']['chat'].split(', '))]
-		self.filter_user = [x for x in map(int, config['filters']['user'].split(', '))]
+		self.filter_chat = list(map(int, config['filters']['chat'].split(', ')))
+		self.filter_user = list(map(int, config['filters']['user'].split(', ')))
 
 		self.logger.debug('Filter chat %s', repr(self.filter_chat))
 		self.logger.debug('Filter user %s', repr(self.filter_user))

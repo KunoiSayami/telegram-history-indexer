@@ -1,4 +1,4 @@
-pyrogram>=0.14.1
+pyrogram>=0.15.1
 pymysql
 opencc-python-reimplemented
 tgcrypto

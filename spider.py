@@ -17,7 +17,6 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
-from pyrogram import Dialogs
 import pyrogram.errors
 import threading
 import traceback
@@ -66,7 +65,7 @@ class iter_user_messages(threading.Thread):
 				dialogs = self.client.get_dialogs(offset_date)
 				self.process_dialogs(dialogs, sqlObj)
 				time.sleep(3)
-				offset_date = dialogs.dialogs[-1].top_message.date - 1
+				offset_date = dialogs[-1].top_message.date - 1
 				sqlObj = self.conn.query1("SELECT `last_message_id`, `indexed` FROM `indexed_dialogs` WHERE `user_id` = -1")
 			except pyrogram.errors.FloodWait as e:
 				self.logger.warning('Caughted Flood wait, wait %d seconds', e.x)
@@ -77,7 +76,7 @@ class iter_user_messages(threading.Thread):
 			self.indenify_user()
 		self.logger.debug('Search over')
 
-	def process_dialogs(self, dialogs: Dialogs, sqlObj: dict or None):
+	def process_dialogs(self, dialogs: list, sqlObj: dict or None):
 		for dialog in dialogs.dialogs:
 			try:
 				self.conn.execute("INSERT INTO `indexed_dialogs` (`user_id`, `last_message_id`) VALUE (%s, %s)", (dialog.chat.id, dialog.top_message.message_id))
@@ -86,14 +85,14 @@ class iter_user_messages(threading.Thread):
 			self.indexer.user_profile_track(dialog.top_message)
 		try:
 			if sqlObj:
-				self.conn.execute("UPDATE `indexed_dialogs` SET `last_message_id` = %s WHERE `user_id` = -1", (dialogs.dialogs[-1].top_message.date - 1, ))
+				self.conn.execute("UPDATE `indexed_dialogs` SET `last_message_id` = %s WHERE `user_id` = -1", (dialogs[-1].top_message.date - 1, ))
 			else: # If None
-				self.conn.execute("INSERT INTO `indexed_dialogs` (`user_id`, `last_message_id`) VALUE (%s, %s)", (-1, dialogs.dialogs[-1].top_message.date - 1))
+				self.conn.execute("INSERT INTO `indexed_dialogs` (`user_id`, `last_message_id`) VALUE (%s, %s)", (-1, dialogs[-1].top_message.date - 1))
 		except IndexError:
 			if sqlObj:
 				self.conn.execute("UPDATE `indexed_dialogs` SET `indexed` = 'Y' WHERE `user_id` = -1")
 			else:
-				self.conn.execute("INSERT INTO `indexed_dialogs` (`user_id`,`indexed`, `last_message_id`) VALUE (-1, 'Y', 0)")
+				self.conn.execute("INSERT INTO `indexed_dialogs` (`user_id`, `indexed`, `last_message_id`) VALUE (-1, 'Y', 0)")
 			raise
 		finally:
 			self.conn.commit()
@@ -124,7 +123,7 @@ class iter_user_messages(threading.Thread):
 			if self.__process_messages(msg_his.messages, force_check):
 				break
 			try:
-				offset_id = msg_his.messages[-1].message_id - 1
+				offset_id = msg_his[-1].message_id - 1
 			except IndexError:
 				break
 			time.sleep(3)
@@ -133,6 +132,7 @@ class iter_user_messages(threading.Thread):
 		for x in msg_group:
 			if force_check: x.edit_date = 0
 			self.indexer.trackers.msg_queue.put_nowait(x)
+			#self.indexer._insert_msg(x, force_check)
 			if x.date < self.end_time:
 				return True
 		return
@@ -163,7 +163,7 @@ class iter_user_messages(threading.Thread):
 			try:
 				dialogs = self.client.get_dialogs(offset_date)
 				for x in dialogs.dialogs:
-					if x.top_message.date < self.end_time:
+					if x.top_message.date < self.end_time: 
 						raise IndexError
 					chats.append((x.chat.id, x.top_message.message_id))
 				offset_date = dialogs.dialogs[-1].top_message.date - 1
