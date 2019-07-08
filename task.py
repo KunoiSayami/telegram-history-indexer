@@ -31,7 +31,7 @@ from libpy3.mysqldb import mysqldb, pymysql
 from type_custom import user_profile
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARNING)
 
 class fake_notify_class:
 	def send(self):
@@ -143,13 +143,13 @@ class msg_tracker_thread_class(threading.Thread):
 		self.user_queue = Queue()
 		self.client = client
 		self.conn = conn
-		self.media_send_target = media_send_target
+		self.media_send_target = int(media_send_target)
 		self.other_client = other_client
 		self.filter_func = filter_func
 		if self.other_client is None:
 			self.other_client = self.client
 		if media_send_target != 0:
-			self.media_thread = profile_photo_cache_class(client, conn, media_send_target)
+			self.media_thread = profile_photo_cache_class(self.client, self.conn, self.media_send_target)
 		self.notify = notify
 		if self.notify is None:
 			self.notify = fake_notify_class()
@@ -214,7 +214,7 @@ class msg_tracker_thread_class(threading.Thread):
 			sqlObj = self.conn.query1("SELECT `user_id` FROM `user_history` WHERE `full_name` LIKE %s LIMIT 1", (msg.forward_sender_name,))
 			forward_from_id = sqlObj['user_id'] if sqlObj else -1001228946795
 		else:
-			forward_from_id = msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None,
+			forward_from_id = msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None
 
 		self.conn.execute(
 			"INSERT INTO `index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`) VALUE (%s, %s, %s, %s, %s, %s)",
@@ -289,7 +289,8 @@ class msg_tracker_thread_class(threading.Thread):
 			self._user_tracker()
 			self.conn.commit()
 
-	def emergency_write(self, obj: Message):
+	@staticmethod
+	def emergency_write(obj: Message):
 		with open(f'emergency_{"msg" if isinstance(obj, Message) else "user"}.bk', 'a') as fout:
 			fout.write(repr(obj) + '\n')
 
@@ -367,13 +368,16 @@ class msg_tracker_thread_class(threading.Thread):
 			return self._real_user_index(u)
 		return False
 
+	def push_user(self, user: User):
+		self.user_queue.put_nowait(user)
+
 	def push(self, msg: Message, no_user: bool = False):
 		self.msg_queue.put_nowait(msg)
 		if no_user: return
 		users = [x.raw for x in list(set(user_profile(x) for x in [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat, msg.via_bot]))]
 		users.remove(None)
 		for x in users:
-			self.user_queue.put_nowait(x)
+			self.push_user(x)
 
 	@staticmethod
 	def get_msg_type(msg: Message):
@@ -438,4 +442,3 @@ class check_dup(threading.Thread):
 	@staticmethod
 	def get_hash(sqlObj: dict):
 		return hashlib.sha256(' '.join(map(str, (sqlObj['chat_id'], sqlObj['message_id'], sqlObj['from_user']))).encode()).hexdigest()
-

@@ -28,7 +28,7 @@ import task
 import time
 import os
 
-class history_index_class(object):
+class history_index_class:
 	def __init__(self, client: Client = None, conn: mysqldb = None, other_client: Client or bool = None):
 		self.logger = logging.getLogger(__name__)
 		self.logger.setLevel(level = logging.WARNING)
@@ -106,11 +106,14 @@ class history_index_class(object):
 			return True
 		return False
 
-	def handle_raw_update(self, _client: Client, update: Update, *_args):
+	def handle_raw_update(self, client: Client, update: Update, *_args):
 		if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
-			self.trackers.push(update, True)
+			return self.trackers.push(update, True)
 		if isinstance(update, pyrogram.api.types.UpdateDeleteMessages):
-			self.trackers.push(update, True)
+			return self.trackers.push(update, True)
+		if isinstance(update, (pyrogram.api.types.UpdateUserName, pyrogram.api.types.UpdateUserPhoto)):
+			userObj = client.get_users(update.user_id)
+			return self.trackers.push_user(userObj)
 
 	def pre_process(self, _: Client, msg: Message):
 		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
@@ -126,8 +129,11 @@ class history_index_class(object):
 		self.logger.info('start indexer')
 		self.trackers.start()
 		if self.other_client != self.client:
+			self.logger.debug('Starting other client')
 			self.other_client.start()
+		self.logger.debug('Starting main watcher')
 		self.client.start()
+		self.logger.debug('telegram client: logined.')
 		self.index_dialog.recheck()
 		self.index_dialog.start()
 
