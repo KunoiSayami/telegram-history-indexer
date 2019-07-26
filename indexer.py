@@ -114,6 +114,9 @@ class history_index_class:
 		if isinstance(update, (pyrogram.api.types.UpdateUserName, pyrogram.api.types.UpdateUserPhoto)):
 			userObj = client.get_users(update.user_id)
 			return self.trackers.push_user(userObj)
+		if isinstance(update, pyrogram.api.types.UpdateUserStatus) and \
+			isinstance(update.status, (pyrogram.api.types.UserStatusOffline, pyrogram.api.types.UserStatusOnline)):
+			return self.trackers.push(update, True)
 
 	def pre_process(self, _: Client, msg: Message):
 		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
