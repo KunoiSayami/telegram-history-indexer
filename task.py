@@ -168,8 +168,11 @@ class msg_tracker_thread_class(threading.Thread):
 		while True:
 			while self.msg_queue.empty():
 				time.sleep(0.1)
-			self.filter_msg()
-			self.conn.commit()
+			try:
+				self.filter_msg()
+				self.conn.commit()
+			except:
+				logger.exception('Got exception in run thread, ignore it.')
 
 	def _filter_msg(self, msg: Message):
 		if msg.new_chat_members:
@@ -247,7 +250,8 @@ class msg_tracker_thread_class(threading.Thread):
 		sz = [[chat_id, x] for x in msgs]
 		self.conn.execute("INSERT INTO `deleted_message` (`chat_id`, `message_id`) VALUES (%s, %s)" , sz, True)
 
-	def insert_delete_record(self, update: pyrogram.api.types.UpdateDeleteMessages):
+	def process_updates(self, update: "pyrogram.api.types.UpdateUserStatus" or "pyrogram.api.types.UpdateDeleteMessages"):
+		# Process delete message
 		if isinstance(update, pyrogram.api.types.UpdateDeleteMessages):
 			sqlObj = None
 			for x in update.messages:
@@ -257,15 +261,31 @@ class msg_tracker_thread_class(threading.Thread):
 			if sqlObj:
 				self._insert_delete_record(sqlObj['chat_id'], update.messages)
 			return True
+
 		if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
 			self._insert_delete_record(-(update.channel_id + 1000000000000), update.messages)
 			return True
+
+		# Process insert online record
+		if isinstance(update, pyrogram.api.types.UpdateUserStatus):
+			online_timestamp = (update.status.expires - 300) if isinstance(update.status, pyrogram.api.types.UserStatusOnline) else \
+				update.status.was_online
+			self.conn.execute(
+				"INSERT INTO `online_records` (`user_id`, `online_timestamp`, `is_offline`) VALUE (%s, %s, %s)",
+				(
+					update.user_id,
+					datetime.datetime.fromtimestamp(online_timestamp),
+					'N' if isinstance(update.status, pyrogram.api.types.UserStatusOnline) else 'Y'
+				)
+			)
+			return True
+
 		return False
 
 	def filter_msg(self):
 		while not self.msg_queue.empty():
 			msg = self.msg_queue.get_nowait()
-			if self.insert_delete_record(msg):
+			if self.process_updates(msg):
 				continue
 			if self.filter_func(msg):
 				continue
@@ -289,8 +309,7 @@ class msg_tracker_thread_class(threading.Thread):
 			self._user_tracker()
 			self.conn.commit()
 
-	@staticmethod
-	def emergency_write(obj: Message):
+	def emergency_write(self, obj: Message):
 		with open(f'emergency_{"msg" if isinstance(obj, Message) else "user"}.bk', 'a') as fout:
 			fout.write(repr(obj) + '\n')
 
