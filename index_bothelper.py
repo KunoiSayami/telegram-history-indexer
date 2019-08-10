@@ -19,8 +19,9 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 from libpy3.mysqldb import mysqldb
 from configparser import ConfigParser
+import pyrogram
 from pyrogram import Client, Message, MessageHandler, Filters, CallbackQueryHandler, CallbackQuery,\
-	InlineKeyboardMarkup, InlineKeyboardButton, DisconnectHandler, ContinuePropagation
+	InlineKeyboardMarkup, InlineKeyboardButton, DisconnectHandler, ReplyKeyboardRemove, ContinuePropagation
 import hashlib
 import warnings
 import threading
@@ -30,12 +31,13 @@ import math
 import re
 import opencc
 import itertools
-from type_custom import hashable_user as user, hashable_message_record as hashmsg
+from type_custom import hashable_user as user, hashable_message_record as hashmsg, user_profile as userp
 import task
 import logging
 from queue import Queue
 import datetime
-import pyrogram.errors
+import operator
+
 logger = logging.getLogger('index_bothelper')
 
 class type_sql_cache(object):
@@ -69,7 +71,7 @@ class sql_cache_thread(threading.Thread):
 		try:
 			self._process_obj()
 		except:
-			pass
+			logger.exception('Exception in processing user_obj')
 
 	def _process_obj(self):
 		while not self.queue.empty():
@@ -89,9 +91,10 @@ class sql_cache_thread(threading.Thread):
 
 class user_cache_thread(threading.Thread):
 
-	def __init__(self, conn: mysqldb):
+	def __init__(self, client: Client, conn: mysqldb):
 		threading.Thread.__init__(self, daemon = True)
 		self.conn = conn
+		self.client = client
 		self._cache_dict = {}
 
 	def run(self):
@@ -110,7 +113,7 @@ class user_cache_thread(threading.Thread):
 	def get(self, user_id: int, no_id: bool = False):
 		return self._get(user_id, no_id)
 
-	def _get(self, user_id: int, no_id: bool):
+	def _get(self, user_id: int):
 		if user_id not in self._cache_dict:
 			sqlObj = self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user_id)
 			if sqlObj is not None:
@@ -125,6 +128,8 @@ class user_cache_thread(threading.Thread):
 class bot_search_helper(object):
 	STEP = re.compile(r'Page: (\d+) / \d+')
 	PAGE_MAX = 5
+	CACHE_PAGE_SIZE = 20
+	CACHE_START_REFRESH = 2
 
 	def __init__(self, conn: mysqldb = None, bot_instance: Client or str = '', owner_id: int = 0):
 		self.force_query = None
@@ -132,9 +137,10 @@ class bot_search_helper(object):
 		self.only_group = None
 		self.except_forward = None
 		self.except_bot = None
-		self.is_specify_id = None
-		self.is_specify_chat = None
-		self.specify_id = 0
+		self.use_specify_user_id = None
+		self.use_specify_chat_id = None
+		self.specify_user_id = 0
+		self.specify_chat_id = 0
 		self.page_limit = 0
 		self.show_info_detail = None
 
@@ -155,7 +161,7 @@ class bot_search_helper(object):
 			)
 			self.bot_id = int((bot_instance if bot_instance != '' else config['account']['indexbot_token']).split(':')[0])
 			self.owner = int(config['account']['owner'])
-			self.cache_channel = int(config['account']['cache_channel'])
+			self.cache_channel = int(config['account']['media_send_target'])
 
 		if conn is None:
 
@@ -183,7 +189,7 @@ class bot_search_helper(object):
 		self.update_lock = threading.Lock()
 		self.edit_queue_lock = threading.Lock()
 
-		self.user_cache = user_cache_thread(self.conn)
+		self.user_cache = user_cache_thread(self.bot, self.conn)
 		self.query_cache = sql_cache_thread(self.conn, self.update_cache)
 
 	def start(self):
@@ -233,11 +239,13 @@ class bot_search_helper(object):
 			return msg.reply('Another query in progress, please wait a moment')
 		try:
 			self._handle_query_edits(msg)
+		except:
+			logging.exception('Exception occured in query_edits:')
 		finally:
 			self.edit_queue_lock.release()
 
 	def query_current_messages(self, edits: list):
-		edits = sorted(edits, operator.attrgetter('timestamp'), True)
+		edits = sorted(edits, key=operator.attrgetter('timestamp'), reverse=True)
 		return [self._query_current_messages(x) for x in edits]
 
 	def _handle_query_edits(self, msg: Message):
@@ -281,9 +289,16 @@ class bot_search_helper(object):
 					return msg.reply('use `/set limit <value>` to set page limit', True)
 			elif msggroup[1] == 'id':
 				try:
-					self.specify_id = int(msggroup[2])
+					self.specify_user_id = int(msggroup[2])
 				except ValueError:
-					return msg.reply('use `/set id <value>` to set specify id', True)
+					return msg.reply('use `/set id <value>` to set specify user id', True)
+			elif msggroup[1] == 'cid':
+				try:
+					self.specify_chat_id = int(msggroup[2])
+				except ValueError:
+					return msg.reply('use `/set cid <value>` to set specify chat id', True)
+			else:
+				return msg.reply('Usage: `/set (id|cid|limit) <value>`', True)
 			self.update_setting()
 			msg.reply(self.generate_settings(), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
 
@@ -306,12 +321,14 @@ class bot_search_helper(object):
 	def update_setting(self):
 		self.conn.execute(
 			"UPDATE `settings` "
-			"SET `force_query` = %s, `only_user` = %s, `only_group` = %s, `show_info_detail` = %s, `except_forward` = %s,"
-			" `except_bot` = %s, `is_specify_id` = %s, `is_specify_chat` = %s, `specify_id` = %s, `page_limit` = %s "
+			"SET `force_query` = %s, `only_user` = %s, `only_group` = %s, `show_info_detail` = %s, `except_forward` = %s, "
+			"`except_bot` = %s, `use_specify_user_id` = %s, `use_specify_chat_id` = %s, `specify_user_id` = %s, "
+			"`specify_chat_id` = %s, `page_limit` = %s "
 			"WHERE `user_id` = %s",
 			[self._getbool_reversed(x) for x in (
 				self.force_query, self.only_user, self.only_group, self.show_info_detail, self.except_forward, self.except_bot,
-				self.is_specify_id, self.is_specify_chat, self.specify_id, self.page_limit, self.owner
+				self.use_specify_user_id, self.use_specify_chat_id, self.specify_user_id, self.specify_chat_id, self.page_limit,
+				self.owner
 			)]
 		)
 
@@ -326,7 +343,7 @@ class bot_search_helper(object):
 
 	def handle_forward(self, client: Client, msg: Message):
 		if msg.text and msg.text.startswith('/'):
-			return
+			raise ContinuePropagation
 		chat_id = msg.chat.id
 		msg.chat = msg.from_user = msg.entities = msg.caption_entities = None
 		client.send_message(chat_id, f'<pre>{msg}</pre>', 'html')
@@ -341,10 +358,11 @@ class bot_search_helper(object):
 			'<b>Only user:</b> <code>{only_user}</code>\n'
 			'<b>Only group:</b> <code>{only_group}</code>\n'
 			'<b>Except forward:</b> <code>{except_forward}</code>\n'
-			'<b>Except bot:</b> <code>{except_bot}</code>\n'
-			'<b>Use specify id:</b> <code>{is_specify_id}</code>\n'
-			'<b>Specify id is chat:</b> <code>{is_specify_chat}</code>\n'
-			'<b>Specify id:</b> <code>{specify_id}</code>\n\n'
+			'<b>Except bot:</b> <code>{except_bot}</code>\n\n'
+			'<b>Use specify user id:</b> <code>{use_specify_user_id}</code>\n'
+			'<b>Specify user id:</b> <code>{specify_user_id}</code>\n\n'
+			'<b>Use specify chat id:</b> <code>{use_specify_chat_id}</code>\n'
+			'<b>Specify chat id:</b> <code>{specify_chat_id}</code>\n\n'
 			'<b>Last refresh:</b> ' + time.strftime('<code>%Y-%m-%d %H:%M:%S</code>')
 			).format(
 				**{x: getattr(self, x, None) for x in dir(self)}
@@ -357,30 +375,29 @@ class bot_search_helper(object):
 				self.only_group,
 				self.except_forward,
 				self.except_bot,
-				self.is_specify_id,
-				self.is_specify_chat,
-				self.specify_id,
+				self.use_specify_user_id,
+				self.specify_user_id,
+				self.use_specify_chat_id,
+				self.specify_chat_id,
 			)
 		)).encode()).hexdigest()
 
 	def generate_settings_keyboard(self):
-		return InlineKeyboardMarkup( inline_keyboard = [
+		return InlineKeyboardMarkup(inline_keyboard=[
 			[
-				InlineKeyboardButton(text = 'Show Detail', callback_data = 'set detail toggle')
+				InlineKeyboardButton(text='Force query', callback_data='set force toggle'),
+				InlineKeyboardButton(text='User only', callback_data='set only user'),
+				InlineKeyboardButton(text='Group only', callback_data='set only group')
 			],
 			[
-				InlineKeyboardButton(text = 'Force query', callback_data = 'set force toggle'),
-				InlineKeyboardButton(text = 'User only', callback_data = 'set only user'),
-				InlineKeyboardButton(text = 'Group only', callback_data = 'set only group')
+				InlineKeyboardButton(text='Specify user id', callback_data='set specify toggle'),
+				InlineKeyboardButton(text='Specify chat id', callback_data='set specify chat'),
+				InlineKeyboardButton(text='Reset id', callback_data='set id reset'),
 			],
 			[
-				InlineKeyboardButton(text = 'Use specify id', callback_data = 'set specify toggle'),
-				InlineKeyboardButton(text = 'Specify chat', callback_data = 'set specify chat'),
-				InlineKeyboardButton(text = 'Reset id', callback_data = 'set id reset')
-			],
-			[
-				InlineKeyboardButton(text = 'Reset', callback_data = 'set reset'),
-				InlineKeyboardButton(text = 'Refresh', callback_data = 'set refresh')
+				InlineKeyboardButton(text='Show Detail', callback_data='set detail toggle'),
+				InlineKeyboardButton(text='Reset', callback_data='set reset'),
+				InlineKeyboardButton(text='Refresh', callback_data='set refresh')
 			]
 		])
 
@@ -442,8 +459,6 @@ class bot_search_helper(object):
 
 	def handle_search_message_history(self, _client: Client, msg: Message):
 		args = msg.text.split()
-		if len(args) == 1:
-			return msg.reply('Please use `/sm <msg_text1> [<msg_text2> <msg_text3> ...]` to search database', True)
 
 		args = args[1:]
 
@@ -466,7 +481,7 @@ class bot_search_helper(object):
 		if text != '404 Not found':
 			msg.reply(text, parse_mode = 'html', reply_markup = self.generate_message_search_keyboard('', search_id, 0, max_count))
 		else:
-			msg.reply(text, True)
+			msg.reply(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Re-search', callback_data=f'msg r {search_id}')]]))
 
 		if max_count != search_check['max_count']:
 			self.update_max_count(search_id, max_count)
@@ -543,18 +558,18 @@ class bot_search_helper(object):
 	def update_cache(self, cache_index: int, step: int):
 
 		sqlObj = self.conn.query1("SELECT `args`, `timestamp`, `type`, `max_count` FROM `query_result_cache` WHERE `_id` = %s", cache_index)
-		upper_limit = step + 5 * self.PAGE_MAX
-		lower_limit = step - 5 * self.PAGE_MAX
-
+		upper_limit = step + (self.CACHE_PAGE_SIZE // 2) * self.PAGE_MAX
+		lower_limit = step - (self.CACHE_PAGE_SIZE // 2) * self.PAGE_MAX
 		if upper_limit > sqlObj['max_count']:
 			# Beyond max count, cache is not need
 			return
 		if lower_limit < 0:
 			lower_limit = 0
 		optionsStr, args, origin_timestamp = self.generate_sql_options(eval(sqlObj['args']), sqlObj['timestamp'], sqlObj['type'])
-
-		sqlObj = self.conn.query(f"SELECT * FROM `{ 'document_' if sqlObj['type'] is not None else ''}index` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {lower_limit}, {10 * self.PAGE_MAX}", args)
-
+		sqlObj = self.conn.query(
+			f"SELECT * FROM `{ 'document_' if sqlObj['type'] is not None else ''}index` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {lower_limit}, {self.CACHE_PAGE_SIZE * self.PAGE_MAX}",
+			args
+		)
 		self.conn.execute("UPDATE `query_result_cache` SET `cache` = %s, `step` = %s WHERE `_id` = %s", (repr(sqlObj), lower_limit, cache_index))
 
 	def __cache_query(self, cache_index: int, step: int, optionsStr: str, args: list, table: str, force_update: bool = False):
@@ -564,21 +579,23 @@ class bot_search_helper(object):
 		# Cache hash should be setting hash
 		cache, cache_step, cache_hash = sqlObj['cache'], sqlObj['step'], sqlObj['cache_hash']
 
+		query_lower = (step - cache_step)
+		if query_lower < 0:
+			query_lower = 0
 
 		if cache == '' or cache_hash != self.settings_hash() or force_update:
 			# NOTE: only init cache require from this function
-			lower_limit = step - 5 * self.PAGE_MAX
+			lower_limit = step - (self.CACHE_PAGE_SIZE // 2) * self.PAGE_MAX
 			if lower_limit < 0:
 				lower_limit = 0
-			sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {lower_limit}, {10 * self.PAGE_MAX}", args)
+			sqlObj = self.conn.query(f"SELECT * FROM `{table}` WHERE {optionsStr} ORDER BY `timestamp` DESC LIMIT {lower_limit}, {self.CACHE_PAGE_SIZE * self.PAGE_MAX}", args)
 			self.query_cache.push(type_sql_cache(cache_index, cache = repr(sqlObj), step = lower_limit, settings_hash = self.settings_hash()))
 		else:
 			sqlObj = eval(cache)
-			if step > 2 * self.PAGE_MAX and abs((cache_step + 5 * self.PAGE_MAX) - step) > 4 * self.PAGE_MAX:
+			if step > self.CACHE_START_REFRESH * self.PAGE_MAX and \
+				abs((cache_step + (self.CACHE_PAGE_SIZE // 2)  * self.PAGE_MAX) - step) > ((self.CACHE_PAGE_SIZE - self.CACHE_START_REFRESH) // 2) * self.PAGE_MAX:
 				self.query_cache.push(type_sql_cache(cache_index, step = step))
-
-
-		return sqlObj[(step - cache_step): (step - cache_step) + self.page_limit]
+		return sqlObj[query_lower: query_lower + self.page_limit]
 
 
 	def _query_history(
@@ -619,8 +636,8 @@ class bot_search_helper(object):
 	def query_mapping_lists(self, _: Client, msg: Message):
 		count = self.conn.query1("SELECT COUNT(*) AS `count` FROM `pending_mapping`")['count']
 		if count:
-			msg.reply(f'Total number of media file(s): {count}', True, reply_markup = InlineKeyboardMarkup( inline_keyboard = [
-				[InlineKeyboardButton( text = 'Force Request', callback_data = 'magic fc mapping')]
+			msg.reply(f'Total number of media file(s): {count}', True, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+				[InlineKeyboardButton(text='Force Request', callback_data='magic fc mapping')]
 			]))
 		else:
 			msg.reply('Table is empty', True)
@@ -684,11 +701,11 @@ class bot_search_helper(object):
 
 		if self.except_forward:
 			args.append('`forward` = 0')
-		if self.is_specify_id:
-			if self.is_specify_chat:
-				args.append(f'`chat_id` = {self.specify_id}')
-			else:
-				args.append(f'`from_user` = {self.specify_id}')
+
+		if self.use_specify_user_id:
+			args.append(f'`from_user` = {self.specify_user_id}')
+		if self.use_specify_chat_id:
+			args.append(f'`chat_id` = {self.specify_chat_id}')
 
 		if len(args) == 0:
 			return ''
@@ -736,7 +753,6 @@ class bot_search_helper(object):
 
 	def handle_page_select(self, datagroup: list, msg: CallbackQuery):
 		if datagroup[1] in ('n', 'b', 'r'):
-
 			sqlObj = self.get_search_history(datagroup[2])
 
 			if datagroup[0] == 'doc':
@@ -781,7 +797,6 @@ class bot_search_helper(object):
 			<current index id>
 			<max index id>
 		'''
-		#msg.data = msg.data.decode()
 		datagroup = msg.data.split()
 
 		if datagroup[0] in ('msg', 'doc'):
@@ -812,17 +827,18 @@ class bot_search_helper(object):
 
 			elif datagroup[1] == 'specify':
 				if datagroup[2] == 'toggle':
-					self.is_specify_id = not self.is_specify_id
+					self.use_specify_user_id = not self.use_specify_user_id
 				elif datagroup[2] == 'chat':
-					self.is_specify_chat = not self.is_specify_chat
+					self.use_specify_chat_id = not self.use_specify_chat_id
 
 			elif datagroup[1] == 'force':
 				self.force_query = not self.force_query
 
 			elif datagroup[1] == 'id':
-				self.is_specify_id = False
-				self.is_specify_id = False
-				self.specify_id = 0
+				self.use_specify_user_id = False
+				self.use_specify_chat_id = False
+				self.specify_user_id = 0
+				self.specify_chat_id = 0
 
 			if datagroup[1] != 'refresh':
 				self.update_setting()
@@ -946,7 +962,7 @@ class bot_search_helper(object):
 
 if __name__ == "__main__":
 	logging.getLogger("pyrogram").setLevel(logging.WARNING)
-	logging.basicConfig(level=logging.WARNING, format = '%(asctime)s - %(levelname)s - %(lineno)d - %(name)s - %(message)s')
+	logging.basicConfig(level=logging.WARNING, format = '%(asctime)s - %(funcName)s - %(lineno)d - %(message)s')
 	b = bot_search_helper()
 	b.start()
 	b.bot.idle()
