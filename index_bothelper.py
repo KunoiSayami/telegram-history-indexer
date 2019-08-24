@@ -101,7 +101,7 @@ class user_cache_thread(threading.Thread):
 		logger.info('user_cache_thread start successful')
 		while True:
 			pending_remove = []
-			if len(self._cache_dict) > 0:
+			if self._cache_dict:
 				ct = time.time()
 				for key, item in self._cache_dict.items():
 					if ct - item['timestamp'] > 1800:
@@ -154,10 +154,10 @@ class bot_search_helper(object):
 			config = ConfigParser()
 			config.read('config.ini')
 			self.bot = Client(
-				session_name = 'index_bot',
-				bot_token = bot_instance if bot_instance != '' else config['account']['indexbot_token'],
-				api_hash = config['account']['api_hash'],
-				api_id = config['account']['api_id']
+				'index_bot',
+				config['account']['api_id'],
+				config['account']['api_hash'],
+				bot_token=bot_instance if bot_instance != '' else config['account']['indexbot_token'],
 			)
 			self.bot_id = int((bot_instance if bot_instance != '' else config['account']['indexbot_token']).split(':')[0])
 			self.owner = int(config['account']['owner'])
@@ -279,9 +279,7 @@ class bot_search_helper(object):
 
 	def handle_setting(self, _client: Client, msg: Message):
 		msggroup = msg.text.split()
-		if len(msggroup) == 1:
-			msg.reply(self.generate_settings(), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
-		elif len(msggroup) == 3:
+		if len(msggroup) == 3:
 			if msggroup[1] == 'limit':
 				try:
 					self.set_page_limit(msggroup[2])
@@ -289,9 +287,14 @@ class bot_search_helper(object):
 					return msg.reply('use `/set limit <value>` to set page limit', True)
 			elif msggroup[1] == 'id':
 				try:
+					self.specify_chat_id = self.specify_user_id = int(msggroup[2])
+				except ValueError:
+					return msg.reply('use `/set id <value>` to set specify id', True)
+			elif msggroup[1] == 'uid':
+				try:
 					self.specify_user_id = int(msggroup[2])
 				except ValueError:
-					return msg.reply('use `/set id <value>` to set specify user id', True)
+					return msg.reply('use `/set uid <value>` to set specify user id', True)
 			elif msggroup[1] == 'cid':
 				try:
 					self.specify_chat_id = int(msggroup[2])
@@ -300,7 +303,7 @@ class bot_search_helper(object):
 			else:
 				return msg.reply('Usage: `/set (id|cid|limit) <value>`', True)
 			self.update_setting()
-			msg.reply(self.generate_settings(), parse_mode = 'html', reply_markup = self.generate_settings_keyboard())
+		msg.reply(self.generate_settings(), parse_mode='html', reply_markup=self.generate_settings_keyboard())
 
 	def initialize_setting(self, init: bool = True):
 		sqlObj = self.conn.query1("SELECT * FROM `settings` WHERE `user_id` = %s", self.owner)
