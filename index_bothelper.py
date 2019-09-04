@@ -210,6 +210,7 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_continue_user_request, Filters.private & Filters.user(self.owner) & Filters.photo & Filters.command('cache')))
 		self.bot.add_handler(MessageHandler(self.handle_insert_cache, Filters.private & Filters.user(self.owner) & Filters.command('cache')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
+		self.bot.add_handler(MessageHandler(self.handle_get_user_online_period, ((Filters.private & Filters.user(self.owner)) | Filters.group) & Filters.command('online')))
 
 		# MessageHandler For media
 		self.bot.add_handler(MessageHandler(self.handle_incoming_image, Filters.media & Filters.chat(self.cache_channel)))
@@ -510,6 +511,47 @@ class bot_search_helper(object):
 		)
 
 	def handle_continue_user_request(self, client: Client, msg: Message):
+	@staticmethod
+	def convert_to_timestamp(t: dict):
+		t['online_timestamp'] = int(t['online_timestamp'].timestamp())
+		return t
+
+	@staticmethod
+	def format_timesteamp(t: int):
+		return datetime.datetime.fromtimestamp(t).strftime('%m/%d %H:%M:%S')
+
+	def get_online_period_string(self, sqlObj: tuple, detail: bool = False):
+		sqlObj = map(self.convert_to_timestamp, sqlObj)
+		lastonline = perv_lastonline = lastoffline = perv_lastoffline = 0
+
+		# Reset last offline timestamp
+		for x in sqlObj:
+			if x['is_offline'] == 'Y':
+				perv_lastoffline = lastoffline = x['online_timestamp']
+				break
+
+		total_online_second = 0
+		strpool = []
+		for x in sqlObj:
+			if x['is_offline'] == 'Y':
+				perv_lastoffline = lastoffline
+				lastoffline = x['online_timestamp']
+				strpool.append('`{}`~`{}`({}m)'.format(self.format_timesteamp(lastonline), self.format_timesteamp(perv_lastoffline), (perv_lastoffline - lastonline)//60))
+			else:
+				perv_lastonline = lastonline
+				lastonline = x['online_timestamp']
+
+		return '\n'.join(strpool[:100])
+
+	def handle_get_user_online_period(self, _client: Client, msg: Message):
+		if msg.chat.id > 0 and len(msg.command) < 2:
+			return msg.reply('Please use `/online <user_id>` to get online period')
+		sqlObj = self.conn.query("SELECT * FROM `online_records` WHERE `user_id` = %s ORDER BY `online_timestamp` DESC LIMIT 200",
+									msg.command[1] if msg.chat.id > 0 else msg.from_user.id)
+		if not sqlObj:
+			return msg.reply('404 record not found')
+		msg.reply(self.get_online_period_string(sqlObj), parse_mode='markdown')
+
 		if len(msg.command) <= 2:
 			raise ContinuePropagation
 		msg.delete()
