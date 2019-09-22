@@ -210,7 +210,7 @@ class bot_search_helper(object):
 		self.bot.add_handler(MessageHandler(self.handle_continue_user_request, Filters.private & Filters.user(self.owner) & Filters.photo & Filters.command('cache')))
 		self.bot.add_handler(MessageHandler(self.handle_insert_cache, Filters.private & Filters.user(self.owner) & Filters.command('cache')))
 		self.bot.add_handler(CallbackQueryHandler(self.handle_query_callback, Filters.user(self.owner)))
-		self.bot.add_handler(MessageHandler(self.handle_get_user_online_period, ((Filters.private & Filters.user(self.owner)) | Filters.group) & Filters.command('online')))
+		self.bot.add_handler(MessageHandler(self.handle_get_user_online_period, Filters.private & Filters.user(self.owner) & Filters.command(['online', 'onlinel'])))
 
 		# MessageHandler For media
 		self.bot.add_handler(MessageHandler(self.handle_incoming_image, Filters.media & Filters.chat(self.cache_channel)))
@@ -520,7 +520,14 @@ class bot_search_helper(object):
 	def format_timesteamp(t: int):
 		return datetime.datetime.fromtimestamp(t).strftime('%m/%d %H:%M:%S')
 
-	def get_online_period_string(self, sqlObj: tuple, detail: bool = False):
+	def get_online_period_string(self, user_id: int, more_record: bool = False, detail: bool = False):
+		sqlObj = self.conn.query("SELECT * FROM `online_records` WHERE `user_id` = %s ORDER BY `online_timestamp` DESC LIMIT {}".format(
+										200 if more_record else 30
+									),
+									user_id)
+		if not sqlObj:
+			return '404 record not found'
+
 		sqlObj = map(self.convert_to_timestamp, sqlObj)
 		lastonline = perv_lastonline = lastoffline = perv_lastoffline = 0
 
@@ -536,21 +543,27 @@ class bot_search_helper(object):
 			if x['is_offline'] == 'Y':
 				perv_lastoffline = lastoffline
 				lastoffline = x['online_timestamp']
-				strpool.append('`{}`~`{}`({}m)'.format(self.format_timesteamp(lastonline), self.format_timesteamp(perv_lastoffline), (perv_lastoffline - lastonline)//60))
+				strpool.append('`{}`~`{}`({}m)'.format(
+					self.format_timesteamp(lastonline), self.format_timesteamp(perv_lastoffline), (perv_lastoffline - lastonline)//60))
 			else:
 				perv_lastonline = lastonline
 				lastonline = x['online_timestamp']
 
-		return '\n'.join(strpool[:100])
+		# https://www.geeksforgeeks.org/python-truncate-a-list/
+		del strpool[100:]
+		strpool.append('Last refresh: `{}`'.format(datetime.datetime.now().replace(microsecond=0)))
+
+		return '\n'.join(strpool)
 
 	def handle_get_user_online_period(self, _client: Client, msg: Message):
 		if msg.chat.id > 0 and len(msg.command) < 2:
 			return msg.reply('Please use `/online <user_id>` to get online period')
-		sqlObj = self.conn.query("SELECT * FROM `online_records` WHERE `user_id` = %s ORDER BY `online_timestamp` DESC LIMIT 200",
-									msg.command[1] if msg.chat.id > 0 else msg.from_user.id)
-		if not sqlObj:
-			return msg.reply('404 record not found')
-		msg.reply(self.get_online_period_string(sqlObj), parse_mode='markdown')
+		msg.reply(self.get_online_period_string(msg.command[1] if msg.chat.id > 0 else msg.from_user.id, msg.command[0][-1] == 'l'),
+			parse_mode='markdown',
+			reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+				InlineKeyboardButton(text='Refresh', callback_data=' '.join(msg.command))
+			]])
+		)
 
 		if len(msg.command) <= 2:
 			raise ContinuePropagation
@@ -718,7 +731,7 @@ class bot_search_helper(object):
 		if len(sqlObj) == 0: return None
 		return InlineKeyboardMarkup( inline_keyboard = [
 			[
-				InlineKeyboardButton( text = x['text'].strip()[:14], callback_data = f'select detail {x["_id"]}')
+				InlineKeyboardButton( text = x['text'].strip()[:14] if x['text'] != '' else '[EMPTY MSG]', callback_data = f'select detail {x["_id"]}')
 			] for x in sqlObj
 		])
 
@@ -904,6 +917,9 @@ class bot_search_helper(object):
 				if datagroup[2] == 'mapping':
 					msg.message.edit_reply_markup()
 					msg.message.reply('/MagicForceMapping', False)
+
+		elif datagroup[0].startswith('online'):
+			msg.message.edit(self.get_online_period_string(datagroup[1], datagroup[0][-1] == 'l'), reply_markup=msg.message.reply_markup)
 
 		msg.answer()
 
