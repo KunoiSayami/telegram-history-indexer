@@ -17,16 +17,15 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
-from libpy3.mysqldb import mysqldb
-from configparser import ConfigParser
-from pyrogram import Client, Message, MessageHandler, api, DisconnectHandler, ContinuePropagation, RawUpdateHandler, Update
-import pyrogram
 import traceback
-from spider import iter_user_messages
 import logging
-import task
-import time
 import os
+from configparser import ConfigParser
+import pyrogram
+from pyrogram import Client, Message, MessageHandler, api, ContinuePropagation, RawUpdateHandler, Update
+from libpy3.mysqldb import mysqldb
+from spider import iter_user_messages
+import task
 
 class history_index_class:
 	def __init__(self, client: Client = None, conn: mysqldb = None, other_client: Client or bool = None):
@@ -67,7 +66,6 @@ class history_index_class:
 		self.bot_id = 0
 
 		if conn is None:
-
 			self.conn = mysqldb(
 				config['mysql']['host'],
 				config['mysql']['username'],
@@ -92,12 +90,11 @@ class history_index_class:
 
 		self.client.add_handler(MessageHandler(self.pre_process), 888)
 		self.client.add_handler(MessageHandler(self.handle_all_message), 888)
-		self.client.add_handler(DisconnectHandler(self.handle_disconnect), 888)
 		self.client.add_handler(RawUpdateHandler(self.handle_raw_update), 999)
 
 		self.index_dialog = iter_user_messages(self)
 
-		self.logger.info('History indexer init success')
+		self.logger.info('History indexer initialize success')
 
 	def check_filter(self, msg: Message):
 		if msg.chat.id in self.filter_chat or \
@@ -105,6 +102,25 @@ class history_index_class:
 			msg.from_user and msg.from_user.id in self.filter_user:
 			return True
 		return False
+
+	def upgrade_from_pyrogram_0_15_1_or_old(self):
+		need_upgrade = True
+		version_info = tuple(map(int, pyrogram.__version__.split('.')))
+		if version_info[0] == 0 and version_info[1] >= 16:
+			sqlObjs = self.conn.query("DESC `document_index`")
+			if sqlObjs and sqlObjs[-2]['Field'] == 'file_ref':
+				need_upgrade = False
+		else:
+			need_upgrade = False
+		if need_upgrade:
+			self.conn.execute('''ALTER TABLE `document_index`
+				ALTER `file_id` DROP DEFAULT
+			''')
+			self.conn.execute('''ALTER TABLE `document_index`
+				CHANGE COLUMN `file_id` `file_id` VARCHAR(80) NOT NULL COLLATE 'utf8_unicode_ci' AFTER `type`,
+				ADD COLUMN `file_ref` VARCHAR(64) NULL DEFAULT NULL AFTER `file_id`
+			''')
+			self.logger.info('Upgrade database successful')
 
 	def handle_raw_update(self, client: Client, update: Update, *_args):
 		if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
@@ -121,7 +137,6 @@ class history_index_class:
 	def pre_process(self, _: Client, msg: Message):
 		if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
 			self.process_magic_function(msg)
-		if self.check_filter(msg): return
 		if msg.chat.id == self.owner: return
 		raise ContinuePropagation
 
@@ -130,6 +145,7 @@ class history_index_class:
 
 	def start(self):
 		self.logger.info('start indexer')
+		self.upgrade_from_pyrogram_0_15_1_or_old()
 		self.trackers.start()
 		if self.other_client != self.client:
 			self.logger.debug('Starting other client')
@@ -165,14 +181,6 @@ class history_index_class:
 
 	def idle(self):
 		return self.client.idle()
-
-	def handle_disconnect(self, _client: Client):
-		#if self._init:
-		#	self.conn.close()
-		self.logger.debug('Disconnecting...')
-		if self.trackers.emergency_mode:
-			self.logger.warning('Emergency mode enabled! Wait more time to finish write.')
-			time.sleep(2)
 
 if __name__ == "__main__":
 	history_index_class(other_client = True).start()

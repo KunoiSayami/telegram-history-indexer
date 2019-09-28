@@ -70,8 +70,8 @@ class profile_photo_cache_class(threading.Thread):
 
 	def run(self):
 		logger.debug('`profile_photo_cache_class\' Thread started!')
-		while not self.client.is_started: time.sleep(0.01)
-		while self.client.is_started:
+		while not self.client.is_connected: time.sleep(0.01)
+		while self.client.is_connected:
 			if not self.queue.empty():
 				self.exc_sql()
 			dt = datetime.datetime.now()
@@ -93,11 +93,12 @@ class profile_photo_cache_class(threading.Thread):
 				self.conn.execute("INSERT INTO `pending_mapping` (`file_id`) VALUES (%s)", file_ids, len(file_ids) > 1)
 		except:
 			logger.exception('Error while insert sql')
+			#traceback.print_exc()
 
 	def _do_get_loop(self):
 		logger.debug('`_do_get_loop\' Thread started!')
-		while not self.client.is_started: time.sleep(0.01)
-		while self.client.is_started:
+		while not self.client.is_connected: time.sleep(0.01)
+		while self.client.is_connected:
 			while self.r_queue.empty():
 				time.sleep(1)
 			self._do_forward()
@@ -135,6 +136,38 @@ class profile_photo_cache_class(threading.Thread):
 	def push(self, file_id: str):
 		self.queue.put_nowait(file_id)
 
+class media_download_thread(threading.Thread):
+	def __init__(self, client: Client, conn: mysqldb):
+		threading.Thread.__init__(self, daemon=True)
+		self.client = client
+		self.conn = conn
+		self.download_queue = Queue()
+
+	def run(self):
+		logger.debug('Download thread is ready to get file.')
+		while True:
+			while not self.download_queue.empty():
+				try:
+					file_id, file_ref = self.download_queue.get()
+					if self.conn.query1("SELECT `file_id` FROM `media_store` WHERE `file_id` = %s", file_id) is not None:
+						continue
+					try:
+						self.client.download_media(file_id, file_ref, 'image.jpg')
+					except pyrogram.errors.RPCError:
+						logger.error('Got rpc error while downloading %s %s', file_id, file_ref)
+					
+					# Insert image file into database
+					# NOTE: insert binary blob should add '_binary' tag
+					# From: https://stackoverflow.com/a/36861041
+					with open('downloads/image.jpg', 'rb') as fin:
+						self.conn.execute("INSERT INTO `media_store` (`file_id`, `body`) VALUE (%s, _binary %s)", (file_id, fin.read()))
+				except:
+					logger.exception('Catched exception in media_download_thread')
+			time.sleep(0.5)
+
+	def push(self, file_id: str, file_ref: str):
+		self.download_queue.put_nowait((file_id, file_ref))
+
 class msg_tracker_thread_class(threading.Thread):
 	def __init__(self, client: Client, conn: mysqldb, filter_func: 'callable', *, notify: notify_class = None, other_client: Client = None, media_send_target: int = 0):
 		threading.Thread.__init__(self, daemon = True)
@@ -146,6 +179,7 @@ class msg_tracker_thread_class(threading.Thread):
 		self.media_send_target = int(media_send_target)
 		self.other_client = other_client
 		self.filter_func = filter_func
+		self.media_download_handle = media_download_thread(self.client, self.conn)
 		if self.other_client is None:
 			self.other_client = self.client
 		if media_send_target != 0:
@@ -160,11 +194,12 @@ class msg_tracker_thread_class(threading.Thread):
 		threading.Thread(target = self.user_tracker, daemon = True).start()
 		threading.Thread.start(self)
 		self.media_thread.start()
+		self.media_download_handle.start()
 		logger.debug('Start `msg_tracker_thread_class\' successful')
 
 	def run(self):
 		logger.debug('`msg_tracker_thread\' started!')
-		while not self.client.is_started: time.sleep(0.5)
+		while not self.client.is_connected: time.sleep(0.5)
 		while True:
 			while self.msg_queue.empty():
 				time.sleep(0.1)
@@ -232,8 +267,8 @@ class msg_tracker_thread_class(threading.Thread):
 		)
 		if _type != 'text':
 			self.conn.execute(
-				"INSERT INTO `document_index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`, `type`, `file_id`) "
-					"VALUE (%s, %s, %s, %s, %s, %s, %s, %s)", (
+				"INSERT INTO `document_index` (`chat_id`, `message_id`, `from_user`, `forward_from`, `text`, `timestamp`, `type`, `file_id`, `file_ref`) "
+					"VALUE (%s, %s, %s, %s, %s, %s, %s, %s, %s)", (
 						msg.chat.id,
 						msg.message_id,
 						msg.from_user.id if msg.from_user else msg.chat.id,
@@ -241,9 +276,13 @@ class msg_tracker_thread_class(threading.Thread):
 						text if len(text) > 0 else None,
 						datetime.datetime.fromtimestamp(msg.date),
 						_type,
-						self.get_file_id(msg, _type)
+						self.get_file_id(msg, _type),
+						self.get_file_ref(msg, _type)
 				)
 			)
+			if _type == 'photo' and msg.chat.id > 0 and not msg.from_user.is_bot:
+				self.media_download_handle.push(self.get_file_id(msg, _type), self.get_file_ref(msg, _type))
+
 		logger.debug('INSERT INTO `index` %d %d %s', msg.chat.id, msg.message_id, text)
 
 	def _insert_delete_record(self, chat_id: int, msgs: list):
@@ -302,7 +341,7 @@ class msg_tracker_thread_class(threading.Thread):
 
 	def user_tracker(self):
 		logger.debug('`user_tracker\' started!')
-		while not self.client.is_started: time.sleep(0.5)
+		while not self.client.is_connected: time.sleep(0.5)
 		while True:
 			while self.user_queue.empty():
 				time.sleep(0.1)
@@ -410,6 +449,10 @@ class msg_tracker_thread_class(threading.Thread):
 	@staticmethod
 	def get_file_id(msg: Message, _type: str):
 		return getattr(msg, _type).file_id
+
+	@staticmethod
+	def get_file_ref(msg: Message, _type: str):
+		return getattr(msg, _type).file_ref
 
 class check_dup(threading.Thread):
 	def __init__(self, conn: mysqldb, delete: bool = False):
