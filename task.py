@@ -29,7 +29,8 @@ from typing import Callable, List, Optional, Union
 import aiofiles
 import pymysql
 import pyrogram
-from pyrogram import Chat, Client, Message, User
+from pyrogram import Client
+from pyrogram.types import Chat, Message, User
 
 from CustomType import UserProfile
 from libpy3.aiomysqldb import MySqlDB
@@ -59,6 +60,7 @@ class NotifyClass(FakeNotifyClass):
 		finally:
 			self.last_send = time.time()
 		return True
+
 
 class MediaDownloader:
 	def __init__(self, client: Client, conn: MySqlDB):
@@ -102,6 +104,7 @@ class MediaDownloader:
 		except:
 			logger.exception('Catched exception in MediaDownloadThread')
 
+
 class MsgTrackerThreadClass:
 	def __init__(self, client: Client, conn: MySqlDB, filter_func: Callable[[bool], Message], *, notify: Optional[NotifyClass] = None, other_client: Optional[Client] = None):
 		#super().__init__(daemon=True)
@@ -139,7 +142,7 @@ class MsgTrackerThreadClass:
 				done, _pending = await asyncio.wait([task], timeout=.5)
 				if len(done):
 					try:
-						self.filter_msg(done.pop().result())
+						await self.filter_msg(done.pop().result())
 					except:
 						logger.exception('Got exception in run function, ignore it.')
 				if not self.work:
@@ -180,30 +183,30 @@ class MsgTrackerThreadClass:
 			_type = 'text'
 
 		if msg.edit_date is not None:
-			sqlObj = await self.conn.query1("SELECT `_id`, `text` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
+			sql_obj = await self.conn.query1("SELECT `_id`, `text` FROM `{}index` WHERE `chat_id` = %s AND `message_id` = %s".format(
 					'document_' if _type != 'text' else ''
 				), (msg.chat.id, msg.message_id))
-			if sqlObj is not None:
-				if text == sqlObj['text']:
+			if sql_obj is not None:
+				if text == sql_obj['text']:
 					return
 				await self.conn.execute("UPDATE `{}index` SET `text` = %s WHERE `_id` = %s".format(
 						'document_' if _type != 'text' else ''
-					), (text, sqlObj['_id']))
+					), (text, sql_obj['_id']))
 				if msg.edit_date != 0:
 					await self.conn.execute("INSERT INTO `edit_history` (`chat_id` , `from_user`, `message_id`, `text`, `timestamp`) VALUE (%s, %s, %s, %s, %s)",
 						(
 							msg.chat.id,
 							msg.from_user.id if msg.from_user else msg.chat.id,
 							msg.message_id,
-							sqlObj['text'],
+							sql_obj['text'],
 							datetime.datetime.fromtimestamp(msg.edit_date)
 						) # type: ignore
 					)
 				return
 
 		if msg.forward_sender_name:
-			sqlObj = await self.conn.query1("SELECT `user_id` FROM `user_history` WHERE `full_name` LIKE %s LIMIT 1", (msg.forward_sender_name,))
-			forward_from_id = sqlObj['user_id'] if sqlObj else -1001228946795
+			sql_obj = await self.conn.query1("SELECT `user_id` FROM `user_history` WHERE `full_name` LIKE %s LIMIT 1", (msg.forward_sender_name,))
+			forward_from_id = sql_obj['user_id'] if sql_obj else -1001228946795
 		else:
 			forward_from_id = msg.forward_from.id if msg.forward_from else msg.forward_from_chat.id if msg.forward_from_chat else None
 
@@ -254,13 +257,13 @@ class MsgTrackerThreadClass:
 	async def process_updates(self, update: Union["pyrogram.api.types.UpdateUserStatus", "pyrogram.api.types.UpdateDeleteMessages", "pyrogram.api.types.UpdateDeleteChannelMessages"]) -> bool:
 		# Process delete message
 		if isinstance(update, pyrogram.api.types.UpdateDeleteMessages):
-			sqlObj = None
+			sql_obj = None
 			for x in update.messages:
-				sqlObj = await self.conn.query1("SELECT `chat_id` FROM `index` WHERE `message_id` = %s", x)
-				if sqlObj:
+				sql_obj = await self.conn.query1("SELECT `chat_id` FROM `index` WHERE `message_id` = %s", x)
+				if sql_obj:
 					break
-			if sqlObj:
-				await self._insert_delete_record(sqlObj['chat_id'], update.messages)
+			if sql_obj:
+				await self._insert_delete_record(sql_obj['chat_id'], update.messages)
 			return True
 
 		if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
@@ -312,21 +315,21 @@ class MsgTrackerThreadClass:
 	async def insert_username(self, user: Union[User, Chat]) -> None:
 		if user.username is None:
 			return
-		sqlObj = await self.conn.query1("SELECT `username` FROM `username_history` WHERE `user_id` = %s ORDER BY `_id` DESC LIMIT 1", user.id)
-		if sqlObj and sqlObj['username'] == user.username:
+		sql_obj = await self.conn.query1("SELECT `username` FROM `username_history` WHERE `user_id` = %s ORDER BY `_id` DESC LIMIT 1", user.id)
+		if sql_obj and sql_obj['username'] == user.username:
 			return
 		await self.conn.execute("INSERT INTO `username_history` (`user_id`, `username`) VALUE (%s, %s)", (user.id, user.username))
 		#self.conn.commit()
 
 	async def _real_user_index(self, user: Union[User, Chat], *, enable_request: bool = False) -> bool:
 		await self.insert_username(user)
-		sqlObj = await self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user.id)
+		sql_obj = await self.conn.query1("SELECT * FROM `user_index` WHERE `user_id` = %s", user.id)
 		user_profile = UserProfile(user)
 		try:
 			peer_id = (await self.client.resolve_peer(user_profile.user_id)).access_hash
 		except (KeyError, pyrogram.errors.RPCError, AttributeError):
 			peer_id = None
-		if sqlObj is None:
+		if sql_obj is None:
 			is_bot = isinstance(user, User) and user.is_bot
 			is_group = user.id < 0
 			await self.conn.execute(
@@ -346,9 +349,9 @@ class MsgTrackerThreadClass:
 			if user_profile.photo_id:
 				self.media_downloader.push(user_profile.photo_id)
 			return True
-		if peer_id != sqlObj['peer_id']:
+		if peer_id != sql_obj['peer_id']:
 			await self.conn.execute("UPDATE `user_index` SET `peer_id` = %s WHERE `user_id` = %s", (peer_id, user_profile.user_id)) # type: ignore
-		if user_profile.hash != sqlObj['hash']:
+		if user_profile.hash != sql_obj['hash']:
 			await self.conn.execute(
 				"UPDATE `user_index` SET `first_name` = %s, `last_name` = %s, `photo_id` = %s, `hash` = %s, `peer_id` = %s, `timestamp` = CURRENT_TIMESTAMP() WHERE `user_id` = %s",
 				(
@@ -364,7 +367,7 @@ class MsgTrackerThreadClass:
 			if user_profile.photo_id:
 				self.media_downloader.push(user_profile.photo_id)
 			return True
-		elif enable_request and (datetime.datetime.now() - sqlObj['last_refresh']).total_seconds() > 3600:
+		elif enable_request and (datetime.datetime.now() - sql_obj['last_refresh']).total_seconds() > 3600:
 			u = await self.client.get_users(user.id) if isinstance(user, User) else await self.client.get_chat(user.id)
 			await self.conn.execute('UPDATE `user_index` SET `last_refresh` = CURRENT_TIMESTAMP() WHERE `user_id` = %s', user.id)
 			return await self._real_user_index(u)
@@ -417,19 +420,19 @@ class check_dup:
 			logger.debug('Current step: %d', step)
 			while True:
 				try:
-					sqlObjx = await self.conn.query(f"SELECT `_id`, `chat_id`, `message_id`, `from_user` FROM `index` WHERE `_id` < %s LIMIT {step}, 200", (last_id,))
+					sql_objx = await self.conn.query(f"SELECT `_id`, `chat_id`, `message_id`, `from_user` FROM `index` WHERE `_id` < %s LIMIT {step}, 200", (last_id,))
 					break
 				except:
 					traceback.print_exc()
 					await asyncio.sleep(1)
-			if len(sqlObjx) == 0: break
-			for sqlObj in sqlObjx:
-				_hash = self.get_hash(sqlObj)
+			if len(sql_objx) == 0: break
+			for sql_obj in sql_objx:
+				_hash = self.get_hash(sql_obj)
 				#print(_hash)
 				try:
 					await self.conn.execute("INSERT INTO `dup_check` (`hash`) VALUE (%s)", (_hash,))
 				except pymysql.IntegrityError:
-					self.msg.append(sqlObj['_id'])
+					self.msg.append(sql_obj['_id'])
 					print(_hash)
 			#self.conn.commit()
 		with open('pending_delete', 'w') as fout:
@@ -450,6 +453,6 @@ class check_dup:
 			await self.check()
 
 	@staticmethod
-	def get_hash(sqlObj: dict):
-		return hashlib.sha256(' '.join(map(str, (sqlObj['chat_id'], sqlObj['message_id'], sqlObj['from_user']))).encode()).hexdigest()
+	def get_hash(sql_obj: dict):
+		return hashlib.sha256(' '.join(map(str, (sql_obj['chat_id'], sql_obj['message_id'], sql_obj['from_user']))).encode()).hexdigest()
 
