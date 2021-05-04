@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # transfer2pgsql.py
-# Copyright (C) 2019-2020 KunoiSayami
+# Copyright (C) 2019-2021 KunoiSayami
 #
 # This module is part of telegram-history-indexer and is released under
 # the AGPL v3 License: https://www.gnu.org/licenses/agpl-3.0.txt
@@ -23,7 +23,7 @@ import aiomysql
 import asyncio
 from configparser import ConfigParser
 
-from typing import Callable, Tuple, Union, Any
+from typing import Callable, Tuple, Union, Any, Optional
 
 config = ConfigParser()
 config.read('config.ini')
@@ -37,8 +37,9 @@ mdatabase = config.get('mysql', 'history_db')
 pdatabase = config.get('pgsql', 'database')
 
 
+
 async def main() -> None:
-    pgsql_connection = await asyncpg.connect(host=host, port=port, user=puser, password=ppasswd, database=pdatabase)
+    pgsql_connection = await asyncpg.connect(host='127.0.0.1', port=port, user=puser, password=ppasswd, database=pdatabase)
     mysql_connection = await aiomysql.create_pool(
         host=host,
         user=muser,
@@ -63,46 +64,72 @@ async def main() -> None:
             await exec_and_insert(cursor, "SELECT * FROM group_history", pgsql_connection,
                                   '''INSERT INTO "group_history" VALUES ($1, $2, $3, $4)  ON CONFLICT DO NOTHING''', transfer2, True)
             await exec_and_insert(cursor, "SELECT * FROM `index`", pgsql_connection,
-                                  '''INSERT INTO "index" VALUES ($1, $2, $3, $4, $5, $6)  ON CONFLICT DO NOTHING''', transfer2, True)
+                                  '''INSERT INTO "message_index" VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING''', message_index_transfer, True)
             await exec_and_insert(cursor, "SELECT * FROM online_records", pgsql_connection,
-                                  '''INSERT INTO "online_records" VALUES ($1, $2, $3)''', transfer, bigdata=True)
+                                  '''INSERT INTO "online_record" VALUES ($1, $2, $3)''', transfer, bigdata=True)
             await exec_and_insert(cursor, "SELECT * FROM user_history", pgsql_connection,
-                                  '''INSERT INTO "user_history" VALUES ($1, $2, $3, $4, $5, $6, $7)''',  bigdata=True)
+                                  '''INSERT INTO "user_history" VALUES ($1, $2, $3, $4, $5, $6, $7)   ON CONFLICT DO NOTHING''', transfer4,  bigdata=True)
             await exec_and_insert(cursor, "SELECT * FROM user_index", pgsql_connection,
-                                  '''INSERT INTO "user_index" VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)''', transfer3, bigdata=True)
+                                  '''INSERT INTO "user_index" VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)  ON CONFLICT DO NOTHING''', transfer3, bigdata=True)
             await exec_and_insert(cursor, "SELECT * FROM username_history", pgsql_connection,
-                                  '''INSERT INTO "username_history" VALUES ($1, $2, $3, $4)''', bigdata=True)
+                                  '''INSERT INTO "username_history" VALUES ($1, $2, $3, $4)   ON CONFLICT DO NOTHING''', bigdata=True)
     await pgsql_connection.close()
     mysql_connection.close()
     await mysql_connection.wait_closed()
 
 
+def str2bool(x: str) -> bool:
+    return x == 'Y'
+
+
 def transfer(obj: Tuple[int, str, str, str]) -> Tuple[Union[bool, Any], ...]:
-    def str2bool(x: str) -> bool:
-        return True if x == 'Y' else False
     return tuple(map(lambda x: str2bool(x) if isinstance(x, str) else x, obj))
 
+
 def transfer2(obj):
+    print(obj[1:])
     return obj[1:]
 
 
+def get_table_name(sql: str) -> str:
+    return sql.split("\"", maxsplit=3)[1]
+
+
+def transfer4(obj):
+    return obj[0], str(obj[1]), obj[2], obj[3], obj[4], obj[5], obj[6]
+
+
 def transfer3(obj: Tuple[int, str, str, str]) -> Tuple[Union[bool, Any], ...]:
-    def str2bool(x: str) -> bool:
-        return True if x == 'Y' else False
     return tuple((*obj[:6], str2bool(obj[6]), str2bool(obj[7]), *obj[8:]))
+
+def transfer5(obj):
+    obj = transfer3(obj)
+    return str(obj[1]), *obj[2:]
+
+
+def message_index_transfer(obj):
+    obj = obj[1:]
+    return obj[0], obj[3], obj[1], obj[2], obj[4], obj[5]
+
+def print_all(obj):
+    print(obj)
+    return obj
 
 
 async def exec_and_insert(cursor, sql: str, pg_connection, insert_sql: str,
                           process: Callable[[Any], Any] = None, bigdata: bool = False) -> None:
     print('Processing table:', sql[13:])
-    if await pg_connection.fetchrow(f'{sql.replace("`", "")} LIMIT 1') is not None:
-        if input(f'Table {sql[13:]} has data, do you still want to process insert? [y/N]: ').strip().lower() != 'y':
-            return
-        if input(f'Table {sql[13:]} has data, do you want to truncate it? [y/N]: ').strip().lower() != 'y':
-            await pg_connection.execute(f'''TRUNCATE "{sql[13:]}"''')
+    real_table_name = get_table_name(insert_sql)
+    try:
+        if await pg_connection.fetchrow(f'SELECT * FROM "{real_table_name}" LIMIT 1') is not None:
+            if input(f'Table {real_table_name} has data, do you still want to process insert? [y/N]: ').strip().lower() != 'y':
+                return
+            if input(f'Table {real_table_name} has data, do you want to truncate it? [y/N]: ').strip().lower() != 'y':
+                await pg_connection.execute(f'''TRUNCATE "{real_table_name}"''')
+    except asyncpg.UndefinedTableError:
+        pass
     if bigdata:
         step = 0
-        total = 0
         await cursor.execute(f'SELECT count(*) FROM {sql[14:]}')
         total = (await cursor.fetchone())[0]
         await cursor.execute(f'{sql} LIMIT {step}, 1000')
