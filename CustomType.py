@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # type_custom.py
-# Copyright (C) 2019-2020 KunoiSayami
+# Copyright (C) 2019-2021 KunoiSayami
 #
 # This module is part of telegram-history-helper and is released under
 # the AGPL v3 License: https://www.gnu.org/licenses/agpl-3.0.txt
