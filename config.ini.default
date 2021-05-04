@@ -5,11 +5,12 @@ owner =
 indexbot_token =
 cache_channel =
 
-[mysql]
+[pgsql]
 host =
+port =
 username =
 passwd =
-history_db =
+database =
 
 [filters]
 chat =
