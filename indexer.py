@@ -25,17 +25,20 @@ from configparser import ConfigParser
 from typing import Dict, List, NoReturn, Optional, Sequence, Union
 
 import pyrogram
-from pyrogram import (Client, ContinuePropagation, Message, MessageHandler,
-                      RawUpdateHandler, Update, api)
+import pyrogram.raw
+import pyrogram.errors
+from pyrogram import Client, ContinuePropagation
+from pyrogram.types import Update, Message
+from pyrogram.handlers import MessageHandler, RawUpdateHandler
 
 import task
-from libpy3.aiomysqldb import MySqlDB
+from libpy3.aiopgsqldb import PgSQLdb
 from spider import iter_user_messages
 
 
 class HistoryIndex:
     def __init__(self, client: Optional[Client] = None,
-                 conn: Optional[MySqlDB] = None,
+                 conn: Optional[PgSQLdb] = None,
                  other_client: Optional[Union[Client, bool]] = None):
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(level=logging.DEBUG)
@@ -74,11 +77,12 @@ class HistoryIndex:
         self.bot_id = 0
 
         if conn is None:
-            self.conn = MySqlDB(
-                config['mysql']['host'],
-                config['mysql']['username'],
-                config['mysql']['passwd'],
-                config['mysql']['history_db'],
+            self.conn = PgSQLdb.create(
+                config['pgsql']['host'],
+                config.getint('pgsql', 'port'),
+                config['pgsql']['username'],
+                config['pgsql']['passwd'],
+                config['pgsql']['database'],
             )
             self.bot_id = int(config['account']['indexbot_token'].split(':')[0])
             self._init = True
@@ -112,15 +116,15 @@ class HistoryIndex:
         return False
 
     async def handle_raw_update(self, client: Client, update: Update, *_args) -> None:
-        if isinstance(update, pyrogram.api.types.UpdateDeleteChannelMessages):
+        if isinstance(update, pyrogram.raw.types.UpdateDeleteChannelMessages):
             return self.trackers.push(update, True)
-        if isinstance(update, pyrogram.api.types.UpdateDeleteMessages):
+        if isinstance(update, pyrogram.raw.types.UpdateDeleteMessages):
             return self.trackers.push(update, True)
-        if isinstance(update, (pyrogram.api.types.UpdateUserName, pyrogram.api.types.UpdateUserPhoto)):
-            userObj = client.get_users(update.user_id)
-            return self.trackers.push_user(userObj)
-        if isinstance(update, pyrogram.api.types.UpdateUserStatus) and \
-                isinstance(update.status, (pyrogram.api.types.UserStatusOffline, pyrogram.api.types.UserStatusOnline)):
+        if isinstance(update, (pyrogram.raw.types.UpdateUserName, pyrogram.raw.types.UpdateUserPhoto)):
+            user_obj = client.get_users(update.user_id)
+            return self.trackers.push_user(user_obj)
+        if isinstance(update, pyrogram.raw.types.UpdateUserStatus) and \
+                isinstance(update.status, (pyrogram.raw.types.UserStatusOffline, pyrogram.raw.types.UserStatusOnline)):
             return self.trackers.push(update, True)
 
     async def stop(self) -> None:
@@ -158,54 +162,15 @@ class HistoryIndex:
         await asyncio.wait(tasks)
         await self.index_dialog.recheck()
 
-    @staticmethod
-    def _parse_html_user(user_id: int, username: Union[str, int, Dict[str, str]]) -> str:
-        if isinstance(username, dict):
-            username = username['full_name']
-        if username is None:
-            username = user_id
-        return f'<a href="tg://user?id={user_id}">{username}</a>'
-
-    async def process_magic_send_ex(self, msg: Message) -> None:
-        args: Sequence[str] = msg.text.split()[1:]
-        await self.client.send_message(
-            int(args[0]),
-            args[1].format(
-                *(
-                    self._parse_html_user(
-                        x,
-                        await self.conn.query1(
-                            'SELECT `full_name` FROM `user_history` WHERE `user_id` = %s ORDER BY `_id` DESC',
-                            x
-                        )
-                    ) for x in args[2:]
-                )
-            ),
-            'html',
-            True
-        )
-
-    async def process_magic_send(self, msg: Message) -> None:
-        args = msg.text.split()[1:]
-        await self.client.send_message(
-            int(args[0]),
-            args[1].format(
-                *(self._parse_html_user(args[2:][x], args[2:][x + 1]) for x in range(0, len(args[2:]), 2))
-            ),
-            'html',
-            True
-        )
-
-    async def pull_messages(self, msg: Message) -> None:
-        pass
-
     async def get_media(self, msg: Message) -> None:
-        strs = msg.text.split()
+        str_array = msg.text.split()
         file_id, file_ref = '', ''
-        if len(strs) == 2:
-            sql_obj = await self.conn.query1("SELECT `ref` FROM `file_ref` WHERE `file_id` = %s AND `timestamp` >= DATE_SUB(NOW(), INTERVAL 115 MINUTE)", strs[1])
+        if len(str_array) == 2:
+            sql_obj = await self.conn.query1(
+                '''SELECT "ref" FROM "file_ref" 
+                WHERE "file_id" = %s AND "timestamp" >= DATE_SUB(NOW(), INTERVAL 115 MINUTE)''', str_array[1])
             if sql_obj is not None:
-                file_id, file_ref = strs[1], sql_obj['ref']
+                file_id, file_ref = str_array[1], sql_obj['ref']
             else:
                 return
             await self.client.send_cached_media(msg.chat.id, strs[1], sql_obj['ref'], f'/newcache {file_id} {file_ref}')
@@ -222,20 +187,14 @@ class HistoryIndex:
                 pass
             elif msg.text.startswith('/MagicDownload'):
                 await self.client.download_media(args[1], file_name='avatar.jpg')
-                await msg.reply_photo('downloads/avatar.jpg', None, False, f'/cache {" ".join(args[1:])}')
+                await msg.reply_photo('downloads/avatar.jpg', False, f'/cache {" ".join(args[1:])}')
                 os.remove('./downloads/avatar.jpg')
-            elif msg.text.startswith('/MagicSendEx'):
-                await self.process_magic_send_ex(msg)
-            elif msg.text.startswith('/MagicSend'):
-                await self.process_magic_send(msg)
-            elif msg.text.startswith('/MagicQuery'):
-                await self.pull_messages(msg.text)
         except pyrogram.errors.RPCError:
             await self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
 
 
     async def idle(self) -> None:
-        await self.client.idle()
+        await pyrogram.idle()
 
 if __name__ == "__main__":
     HistoryIndex(other_client=True).start()

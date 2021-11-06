@@ -27,13 +27,12 @@ import traceback
 from typing import Callable, List, Optional, Union
 
 import aiofiles
-import pymysql
 import pyrogram
 from pyrogram import Client
 from pyrogram.types import Chat, Message, User
 
 from CustomType import UserProfile
-from libpy3.aiomysqldb import MySqlDB
+from libpy3.aiopgsqldb import PgSQLdb
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -110,14 +109,14 @@ class MediaDownloader:
 
 
 class MsgTrackerThreadClass:
-    def __init__(self, client: Client, conn: MySqlDB, filter_func: Callable[[bool], Message], *,
+    def __init__(self, client: Client, conn: PgSQLdb, filter_func: Callable[[bool], Message], *,
                  notify: Optional[NotifyClass] = None, other_client: Optional[Client] = None):
         # super().__init__(daemon=True)
 
         self.msg_queue: asyncio.Queue = asyncio.Queue()
         self.user_queue: asyncio.Queue = asyncio.Queue()
         self.client: Client = client
-        self.conn: MySqlDB = conn
+        self.conn: PgSQLdb = conn
         self.other_client: Optional[Client] = other_client
         self.filter_func: Callable[[bool], Message] = filter_func
         self.media_downloader = MediaDownloader(self.client, self.conn)
@@ -191,14 +190,14 @@ class MsgTrackerThreadClass:
 
         if msg.edit_date is not None:
             sql_obj = await self.conn.query1(
-                '''SELECT "_id", "text" FROM "{}index" WHERE "chat_id" = %s AND "message_id" = %s'''.format(
-                    'document_' if _type != 'text' else ''
+                '''SELECT "_id", "text" FROM "{}_index" WHERE "chat_id" = %s AND "message_id" = %s'''.format(
+                    'document' if _type != 'text' else 'message'
                 ), (msg.chat.id, msg.message_id))
             if sql_obj is not None:
                 if text == sql_obj['text']:
                     return
-                await self.conn.execute('''UPDATE "{}index" SET "text" = %s WHERE "_id" = %s'''.format(
-                    'document_' if _type != 'text' else ''
+                await self.conn.execute('''UPDATE "{}_index" SET "text" = %s WHERE "_id" = %s'''.format(
+                    'document' if _type != 'text' else 'message'
                 ), (text, sql_obj['_id']))
                 if msg.edit_date != 0:
                     await self.conn.execute(
