@@ -1,7 +1,5 @@
 # Telegram history indexer
 
-## DUE TO MY ACCOUNT GOT TELEGRAM BANNED, THIS PROJECT IS NO LONGER MAINTENANCE
-
 A bot that can help you search message in Telegram
 
 ## License

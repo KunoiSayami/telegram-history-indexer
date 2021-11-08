@@ -24,7 +24,7 @@ import aiomysql
 import asyncio
 from configparser import ConfigParser
 
-from typing import Callable, Tuple, Union, Any
+from typing import Callable, Any
 
 config = ConfigParser()
 config.read('config.ini')
@@ -110,7 +110,7 @@ def get_table_name(sql: str) -> str:
 
 
 def transfer4(obj):
-    return obj[0], str(obj[1]), obj[2], obj[3], obj[4], obj[5], obj[6]
+    return obj[0], int(obj[1]), obj[2], obj[3], obj[4], obj[5], obj[6]
 
 
 def transfer3(obj: tuple[int, str, str, str]) -> tuple[Any, ...]:
