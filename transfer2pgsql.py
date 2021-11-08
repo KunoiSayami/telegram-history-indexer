@@ -18,12 +18,13 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
+from __future__ import annotations
 import asyncpg
 import aiomysql
 import asyncio
 from configparser import ConfigParser
 
-from typing import Callable, Tuple, Union, Any, Optional
+from typing import Callable, Tuple, Union, Any
 
 config = ConfigParser()
 config.read('config.ini')
@@ -37,9 +38,9 @@ mdatabase = config.get('mysql', 'history_db')
 pdatabase = config.get('pgsql', 'database')
 
 
-
 async def main() -> None:
-    pgsql_connection = await asyncpg.connect(host='127.0.0.1', port=port, user=puser, password=ppasswd, database=pdatabase)
+    pgsql_connection = await asyncpg.connect(
+        host='127.0.0.1', port=port, user=puser, password=ppasswd, database=pdatabase)
     mysql_connection = await aiomysql.create_pool(
         host=host,
         user=muser,
@@ -55,24 +56,37 @@ async def main() -> None:
         print('Skipped clear database')
     async with mysql_connection.acquire() as conn:
         async with conn.cursor() as cursor:
-            await exec_and_insert(cursor, "SELECT * FROM deleted_message", pgsql_connection,
-                                  '''INSERT INTO "deleted_message" VALUES ($1, $2, $3)''', bigdata=True)
-            await exec_and_insert(cursor, "SELECT * FROM document_index", pgsql_connection,
-                                  '''INSERT INTO "document_index" VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING''', transfer2, True)
-            await exec_and_insert(cursor, "SELECT * FROM edit_history", pgsql_connection,
-                                  '''INSERT INTO "edit_history" VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING''', bigdata=True)
-            await exec_and_insert(cursor, "SELECT * FROM group_history", pgsql_connection,
-                                  '''INSERT INTO "group_history" VALUES ($1, $2, $3, $4)  ON CONFLICT DO NOTHING''', transfer2, True)
-            await exec_and_insert(cursor, "SELECT * FROM `index`", pgsql_connection,
-                                  '''INSERT INTO "message_index" VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING''', message_index_transfer, True)
-            await exec_and_insert(cursor, "SELECT * FROM online_records", pgsql_connection,
-                                  '''INSERT INTO "online_record" VALUES ($1, $2, $3)''', transfer, bigdata=True)
-            await exec_and_insert(cursor, "SELECT * FROM user_history", pgsql_connection,
-                                  '''INSERT INTO "user_history" VALUES ($1, $2, $3, $4, $5, $6, $7)   ON CONFLICT DO NOTHING''', transfer4,  bigdata=True)
-            await exec_and_insert(cursor, "SELECT * FROM user_index", pgsql_connection,
-                                  '''INSERT INTO "user_index" VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)  ON CONFLICT DO NOTHING''', transfer3, bigdata=True)
-            await exec_and_insert(cursor, "SELECT * FROM username_history", pgsql_connection,
-                                  '''INSERT INTO "username_history" VALUES ($1, $2, $3, $4)   ON CONFLICT DO NOTHING''', bigdata=True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM deleted_message", pgsql_connection,
+                '''INSERT INTO "deleted_message" VALUES ($1, $2, $3)''', bigdata=True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM document_index", pgsql_connection,
+                '''INSERT INTO "document_index" VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING''',
+                transfer2, True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM edit_history", pgsql_connection,
+                '''INSERT INTO "edit_history" VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING''', bigdata=True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM group_history", pgsql_connection,
+                '''INSERT INTO "group_history" VALUES ($1, $2, $3, $4)  ON CONFLICT DO NOTHING''', transfer2, True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM `index`", pgsql_connection,
+                '''INSERT INTO "message_index" VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING''',
+                message_index_transfer, True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM online_records", pgsql_connection,
+                '''INSERT INTO "online_record" VALUES ($1, $2, $3)''', transfer, bigdata=True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM user_history", pgsql_connection,
+                '''INSERT INTO "user_history" VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING''',
+                transfer4, bigdata=True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM user_index", pgsql_connection,
+                '''INSERT INTO "user_index" VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)  ON CONFLICT DO NOTHING''',
+                transfer3, bigdata=True)
+            await exec_and_insert(
+                cursor, "SELECT * FROM username_history", pgsql_connection,
+                '''INSERT INTO "username_history" VALUES ($1, $2, $3, $4)   ON CONFLICT DO NOTHING''', bigdata=True)
     await pgsql_connection.close()
     mysql_connection.close()
     await mysql_connection.wait_closed()
@@ -82,12 +96,12 @@ def str2bool(x: str) -> bool:
     return x == 'Y'
 
 
-def transfer(obj: Tuple[int, str, str, str]) -> Tuple[Union[bool, Any], ...]:
+def transfer(obj: tuple[int, str, str, str]) -> tuple[Any, ...]:
     return tuple(map(lambda x: str2bool(x) if isinstance(x, str) else x, obj))
 
 
 def transfer2(obj):
-    print(obj[1:])
+    # print(obj[1:])
     return obj[1:]
 
 
@@ -99,8 +113,16 @@ def transfer4(obj):
     return obj[0], str(obj[1]), obj[2], obj[3], obj[4], obj[5], obj[6]
 
 
-def transfer3(obj: Tuple[int, str, str, str]) -> Tuple[Union[bool, Any], ...]:
-    return tuple((*obj[:6], str2bool(obj[6]), str2bool(obj[7]), *obj[8:]))
+def transfer3(obj: tuple[int, str, str, str]) -> tuple[Any, ...]:
+    return tuple((obj[0], int_or_null(obj[1]), *obj[2:6], str2bool(obj[6]), str2bool(obj[7]), *obj[8:]))
+
+
+def int_or_null(obj: Any) -> int | None:
+    if obj:
+        return int(obj)
+    else:
+        return None
+
 
 def transfer5(obj):
     obj = transfer3(obj)
@@ -110,6 +132,7 @@ def transfer5(obj):
 def message_index_transfer(obj):
     obj = obj[1:]
     return obj[0], obj[3], obj[1], obj[2], obj[4], obj[5]
+
 
 def print_all(obj):
     print(obj)
@@ -122,7 +145,8 @@ async def exec_and_insert(cursor, sql: str, pg_connection, insert_sql: str,
     real_table_name = get_table_name(insert_sql)
     try:
         if await pg_connection.fetchrow(f'SELECT * FROM "{real_table_name}" LIMIT 1') is not None:
-            if input(f'Table {real_table_name} has data, do you still want to process insert? [y/N]: ').strip().lower() != 'y':
+            if input(
+                    f'Table {real_table_name} has data, do you still want to process insert? [y/N]: ').strip().lower() != 'y':
                 return
             if input(f'Table {real_table_name} has data, do you want to truncate it? [y/N]: ').strip().lower() != 'y':
                 await pg_connection.execute(f'''TRUNCATE "{real_table_name}"''')
@@ -135,7 +159,7 @@ async def exec_and_insert(cursor, sql: str, pg_connection, insert_sql: str,
         await cursor.execute(f'{sql} LIMIT {step}, 1000')
         obj = await cursor.fetchall()
         while True:
-            print(f'\rtotal: {total}, step: {step}, process: {(step/total) * 100:.2f}', end='')
+            print(f'\rtotal: {total}, step: {step}, process: {(step / total) * 100:.2f}', end='')
             if process is not None:
                 queue = [pg_connection.executemany(insert_sql, list(process(o) for o in obj))]
             else:
@@ -165,8 +189,8 @@ async def clean(pgsql_connection: asyncpg.connection) -> None:
     await pgsql_connection.execute('''TRUNCATE "document_index"''')
     await pgsql_connection.execute('''TRUNCATE "edit_history"''')
     await pgsql_connection.execute('''TRUNCATE "group_history"''')
-    await pgsql_connection.execute('''TRUNCATE "index"''')
-    await pgsql_connection.execute('''TRUNCATE "online_records"''')
+    await pgsql_connection.execute('''TRUNCATE "message_index"''')
+    await pgsql_connection.execute('''TRUNCATE "online_record"''')
     await pgsql_connection.execute('''TRUNCATE "user_history"''')
     await pgsql_connection.execute('''TRUNCATE "user_index"''')
     await pgsql_connection.execute('''TRUNCATE "username_history"''')
