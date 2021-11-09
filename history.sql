@@ -2,8 +2,8 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 13.2
--- Dumped by pg_dump version 13.2
+-- Dumped from database version 13.4
+-- Dumped by pg_dump version 13.4
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -30,6 +30,22 @@ CREATE TYPE public.document_type AS ENUM (
 
 
 ALTER TYPE public.document_type OWNER TO postgres;
+
+--
+-- Name: update_last_refresh_column(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.update_last_refresh_column() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+   NEW.last_refresh = now();
+   RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.update_last_refresh_column() OWNER TO postgres;
 
 SET default_tablespace = '';
 
@@ -179,7 +195,7 @@ CREATE TABLE public.user_history (
     first_name character varying(256) NOT NULL,
     last_name character varying(256) DEFAULT NULL::character varying,
     full_name character varying(513) DEFAULT ''::character varying NOT NULL,
-    photo_id character varying(80) DEFAULT NULL::character varying NOT NULL,
+    photo_id character varying(80) DEFAULT NULL::character varying,
     last_update timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
@@ -364,5 +380,13 @@ ALTER TABLE ONLY public.username_history
 
 
 --
+-- Name: user_index update_user_index_last_refresh; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER update_user_index_last_refresh BEFORE UPDATE ON public.user_index FOR EACH ROW EXECUTE FUNCTION public.update_last_refresh_column();
+
+
+--
 -- PostgreSQL database dump complete
 --
+
