@@ -26,6 +26,8 @@ from typing import TypeVar
 
 from pyrogram.types import Chat, User
 
+import libpy3.aiopgsqldb
+
 _vT = TypeVar('_vT', str, int, float)
 
 
@@ -57,7 +59,8 @@ class UserProfile(SimpleUserProfile):
         else:
             self.first_name: str = user.first_name
             self.last_name: str | None = user.last_name if user.last_name else None
-            self.full_name: str = '{} {}'.format(self.first_name, self.last_name) if self.last_name else self.first_name
+            self.full_name: str = '{} {}'.format(self.first_name, self.last_name) \
+                if self.last_name else self.first_name
 
         if self.full_name is None:
             warnings.warn(
@@ -98,14 +101,8 @@ class UserProfile(SimpleUserProfile):
                 )
             )
 
-    @property
-    def sql_statement(self) -> str:
-        return self.sql_insert[0]
-
-    @property
-    def sql_args(self) -> tuple[int | str | None, ...]:
-        return self.sql_insert[1]
-
+    async def exec_sql(self, instance: libpy3.aiopgsqldb.PgSQLdb) -> None:
+        await instance.execute(self.sql_insert[0], *self.sql_insert[1])
 
 class HashableUser:
     def __init__(self,

@@ -23,6 +23,7 @@ import concurrent.futures
 import datetime
 import hashlib
 import logging
+import signal
 import time
 import traceback
 from abc import ABCMeta, abstractmethod
@@ -77,7 +78,6 @@ class NotifyClass(SendMethod):
 
 class MediaDownloader:
     def __init__(self, client: Client, conn: PgSQLdb):
-        # threading.Thread.__init__(self, daemon=True)
         self.client: Client = client
         self.conn: PgSQLdb = conn
         self.download_queue: asyncio.Queue = asyncio.Queue()
@@ -109,7 +109,7 @@ class MediaDownloader:
                                       file_id) is not None:
                 return
             try:
-                await self.client.download_media(file_id, file_ref, 'image.jpg')
+                await self.client.download_media(file_id, 'image.jpg')
             except pyrogram.errors.RPCError:
                 logger.error('Got rpc error while downloading %s %s', file_id, file_ref)
 
@@ -150,8 +150,33 @@ class MsgTrackerThreadClass:
         # self.futures.append(self.media_downloader.start())
         logger.debug('Start "MsgTrackerThreadClass\' successful')
 
+    async def stop(self) -> None:
+        self.work = False
+        notified = False
+        logger.info('Waiting all futures to stop.')
+        await asyncio.sleep(1)
+        for future in self.futures:
+            if future.running() and not notified:
+                logger.warning('Future still running, waiting more time to until it finished')
+                notified = True
+            for _ in range(3):
+                if future.running():
+                    await asyncio.sleep(1.5)
+                else:
+                    break
+            if future.running():
+                logger.warning('Future still running after period of time, cancel it.')
+                future.cancel()
+            try:
+                future.result(0)
+            except asyncpg.PostgresError:
+                logger.exception('Got database exception')
+            except (concurrent.futures.CancelledError, concurrent.futures.TimeoutError):
+                pass
+        logger.debug('stopped!')
+
     async def run(self) -> None:
-        logger.debug('"msg_tracker_thread\' started!')
+        logger.debug('`msg_tracker_thread\' started!')
         while not self.client.is_connected:
             await asyncio.sleep(.05)
         while self.work:
@@ -168,6 +193,7 @@ class MsgTrackerThreadClass:
                 if not self.work:
                     task.cancel()
                     return
+        logger.debug('Exit!')
 
     async def filter_msg(self, msg: Message) -> None:
         if await self.process_updates(msg):
@@ -221,7 +247,7 @@ class MsgTrackerThreadClass:
                 )
                 if msg.edit_date != 0:
                     await self.conn.execute(
-                        '''INSERT INTO "edit_history" ("chat_id" , "from_user", "message_id", "body", "message_date") 
+                        '''INSERT INTO "edit_history" ("chat_id" , "from_user", "message_id", "body", "edit_date") 
                         VALUES ($1, $2, $3, $4, $5)''',
                         msg.chat.id,
                         msg.from_user.id if msg.from_user else msg.chat.id,
@@ -282,8 +308,11 @@ class MsgTrackerThreadClass:
     # logger.debug('INSERT INTO "index" %d %d %s', msg.chat.id, msg.message_id, text)
 
     async def _insert_delete_record(self, chat_id: int, msgs: list) -> None:
-        sz = [[chat_id, x] for x in msgs]
-        await self.conn.execute('''INSERT INTO "deleted_message" ("chat_id", "message_id") VALUES ($1, $2)''', sz, True)
+        sz = [(chat_id, x) for x in msgs]
+        await self.conn.execute(
+            '''INSERT INTO "deleted_message" ("chat_id", "message_id") VALUES ($1, $2)''',
+            sz, many=True
+        )
 
     async def process_updates(
             self,
@@ -319,16 +348,41 @@ class MsgTrackerThreadClass:
 
         return False
 
+    async def idle(self) -> None:
+        _idle = asyncio.Event()
+
+        def _reset_idle(*_args):
+            _idle.set()
+
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, _reset_idle)
+        while not _idle.is_set():
+            for future in self.futures:
+                logger.debug('loop %s', future)
+                try:
+                    if (e := future.exception(0)) is not None:
+                        raise e
+                except (pyrogram.errors.RPCError, asyncpg.PostgresError):
+                    logger.exception('Got Telegram or database exception, raising')
+                    raise
+                except (concurrent.futures.CancelledError, concurrent.futures.TimeoutError):
+                    pass
+                if _idle.is_set():
+                    break
+            await asyncio.sleep(1)
+
     async def user_tracker(self) -> None:
-        logger.debug('"user_tracker\' started!')
+        logger.debug('`user_tracker\' started!')
         while not self.client.is_connected:
             await asyncio.sleep(.1)
-        while True:
+        while self.work:
             while self.user_queue.empty():
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(.1)
+                if not self.work:
+                    break
             await self._user_tracker()
-
-    # self.conn.commit()
+        if not self.user_queue.empty():
+            await self._user_tracker()
 
     async def emergency_write(self, obj: Message) -> None:
         async with aiofiles.open(f'emergency_{"msg" if isinstance(obj, Message) else "user"}.bk', 'a') as fout:
@@ -336,7 +390,7 @@ class MsgTrackerThreadClass:
 
     async def _user_tracker(self) -> None:
         while not self.user_queue.empty():
-            u = await self.user_queue.get_nowait()
+            u = self.user_queue.get_nowait()
             try:
                 await self._real_user_index(u)
             except:
@@ -350,15 +404,16 @@ class MsgTrackerThreadClass:
         if user.username is None:
             return
         sql_obj = await self.conn.query1(
-            '''SELECT "username" FROM "username_history" WHERE "user_id" = $1 ORDER BY "_id" DESC LIMIT 1''', user.id)
+            '''SELECT "username" FROM "username_history" WHERE "user_id" = $1 
+            ORDER BY "entry_id" DESC LIMIT 1''',
+            user.id
+        )
         if sql_obj and sql_obj['username'] == user.username:
             return
         await self.conn.execute(
             '''INSERT INTO "username_history" ("user_id", "username") VALUES ($1, $2)''',
             user.id, user.username
         )
-
-    # self.conn.commit()
 
     async def _real_user_index(self, user: User | Chat, *, enable_request: bool = False) -> bool:
         await self.insert_username(user)
@@ -384,18 +439,19 @@ class MsgTrackerThreadClass:
                 is_group,
                 peer_id,
             )
-            await self.conn.execute(user_profile.sql_statement, user_profile.sql_args)  # type: ignore
-            if user_profile.photo_id:
-                self.media_downloader.push(user_profile.photo_id)
+            await user_profile.exec_sql(self.conn)
+            #if user_profile.photo_id:
+            #    self.media_downloader.push(user_profile.photo_id)
             return True
         if peer_id != sql_obj['peer_id']:
-            await self.conn.execute('''UPDATE "user_index" SET "peer_id" = %s WHERE "user_id" = %s''',
-                                    (peer_id, user_profile.user_id))  # type: ignore
+            await self.conn.execute(
+                '''UPDATE "user_index" SET "peer_id" = $1 WHERE "user_id" = $2''',
+                peer_id, user_profile.user_id)
         if user_profile.hash != sql_obj['hash']:
             await self.conn.execute(
                 '''UPDATE "user_index" SET 
                 "first_name" = $1, "last_name" = $2, "photo_id" = $3, "hash" = $4, "peer_id" = $5, 
-                "timestamp" = CURRENT_TIMESTAMP WHERE "user_id" = $6''',
+                "update_time" = CURRENT_TIMESTAMP WHERE "user_id" = $6''',
                 user_profile.first_name,
                 user_profile.last_name,
                 user_profile.photo_id,
@@ -403,9 +459,9 @@ class MsgTrackerThreadClass:
                 peer_id,
                 user_profile.user_id,
             )
-            await self.conn.execute(user_profile.sql_statement, user_profile.sql_args)  # type: ignore
-            if user_profile.photo_id:
-                self.media_downloader.push(user_profile.photo_id)
+            await user_profile.exec_sql(self.conn)
+            #if user_profile.photo_id:
+            #    self.media_downloader.push(user_profile.photo_id)
             return True
         elif enable_request and (datetime.datetime.now() - sql_obj['last_refresh']).total_seconds() > 3600:
             u = await self.client.get_users(user.id) if isinstance(user, User) else await self.client.get_chat(user.id)
@@ -445,10 +501,6 @@ class MsgTrackerThreadClass:
     @staticmethod
     def get_file_id(msg: Message, _type: str) -> str:
         return getattr(msg, _type).file_id
-
-    #@staticmethod
-    #def get_file_ref(msg: Message, _type: str) -> str:
-    #    return getattr(msg, _type).file_ref
 
 
 class CheckDuplicateMessage:

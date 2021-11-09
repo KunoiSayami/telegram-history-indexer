@@ -21,6 +21,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import os
+import signal
 from configparser import ConfigParser
 from dataclasses import dataclass
 from typing import List, NoReturn, Optional, Union
@@ -143,13 +145,19 @@ class HistoryIndex:
             return self.trackers.push_no_user(update)
 
     async def stop(self) -> None:
-        self.trackers.work = False
-        tasks = [asyncio.create_task(self.client.stop())]
-        if self.client != self.other_client:
-            tasks.append(asyncio.create_task(self.other_client.stop()))
-        await asyncio.wait(tasks)
-        if self.managed_conn.managed:
-            await self.conn.close()
+        def sigkill(*args):
+            os.kill(os.getpid(), signal.SIGKILL)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, sigkill)
+        try:
+            await self.trackers.stop()
+        finally:
+            tasks = [asyncio.create_task(self.client.stop())]
+            if self.client != self.other_client:
+                tasks.append(asyncio.create_task(self.other_client.stop()))
+            await asyncio.wait(tasks)
+            if self.managed_conn.managed:
+                await self.conn.close()
 
     async def pre_process(self, _: Client, msg: Message) -> Optional[NoReturn]:
         # if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
@@ -163,7 +171,7 @@ class HistoryIndex:
     async def handle_all_message(self, _: Client, msg: Message) -> None:
         self.trackers.push(msg)
 
-    async def start(self) -> None:
+    async def start(self) -> bool:
         self.logger.info('start indexer')
         tasks = []
         self.trackers.start()
@@ -177,6 +185,7 @@ class HistoryIndex:
         # TODO: #2
         # await self.index_dialog.recheck()
         self.logger.debug('Indexer: started.')
+        return True
 
     # async def get_media(self, msg: Message) -> None:
     #     str_array = msg.text.split()
@@ -212,16 +221,17 @@ class HistoryIndex:
     #     except pyrogram.errors.RPCError:
     #         await self.client.send_message('self', f'<pre>{traceback.format_exc()}</pre>', 'html')
 
-    @staticmethod
-    async def idle() -> None:
-        await pyrogram.idle()
+    async def idle(self) -> None:
+        await self.trackers.idle()
 
 
 async def main():
     index_instance = await HistoryIndex.create(other_client=True)
     await index_instance.start()
-    await index_instance.idle()
-    await index_instance.stop()
+    try:
+        await index_instance.idle()
+    finally:
+        await index_instance.stop()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
