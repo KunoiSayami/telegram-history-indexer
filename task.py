@@ -133,7 +133,7 @@ class MsgTrackerThreadClass:
         self.conn: PgSQLdb = conn
         self.other_client: Client | None = other_client
         self.filter_func: Callable[[Message], bool] = filter_func
-        self.media_downloader = MediaDownloader(self.client, self.conn)
+        # self.media_downloader = MediaDownloader(self.client, self.conn)
         if self.other_client is None:
             self.other_client = self.client
         self.notify = notify
@@ -147,7 +147,7 @@ class MsgTrackerThreadClass:
         logger.debug('Starting "MsgTrackerThreadClass\'')
         self.futures.append(asyncio.run_coroutine_threadsafe(self.user_tracker(), asyncio.get_event_loop()))
         self.futures.append(asyncio.run_coroutine_threadsafe(self.run(), asyncio.get_event_loop()))
-        self.futures.append(self.media_downloader.start())
+        # self.futures.append(self.media_downloader.start())
         logger.debug('Start "MsgTrackerThreadClass\' successful')
 
     async def run(self) -> None:
@@ -157,13 +157,14 @@ class MsgTrackerThreadClass:
         while self.work:
             task = asyncio.create_task(self.msg_queue.get())
             while True:
-                done, _pending = await asyncio.wait([task], timeout=.5)
+                done, _pending = await asyncio.wait([task], timeout=1)
                 if len(done):
                     try:
                         await self.filter_msg(done.pop().result())
                     except asyncpg.PostgresError:
                         logger.exception('Got database exception, raise it.')
-                        break
+                        raise
+                    break
                 if not self.work:
                     task.cancel()
                     return
@@ -189,9 +190,9 @@ class MsgTrackerThreadClass:
             # TODO: Check execute many
             await self.conn.execute(
                 '''INSERT INTO "group_history" 
-                ("chat_id", "user_id", "message_id", "timestamp") VALUES ($1, $2, $3, $4)''',
-                [[msg.chat.id, x.id, msg.message_id, datetime.datetime.fromtimestamp(msg.date)] for x in
-                 msg.new_chat_members], True)
+                ("chat_id", "user_id", "message_id", "history_date") VALUES ($1, $2, $3, $4)''',
+                [(msg.chat.id, x.id, msg.message_id, datetime.datetime.fromtimestamp(msg.date)) for x in
+                 msg.new_chat_members], many=True)
             return
 
         text = msg.text if msg.text else msg.caption if msg.caption else ''
@@ -207,23 +208,25 @@ class MsgTrackerThreadClass:
 
         if msg.edit_date is not None:
             sql_obj = await self.conn.query1(
-                '''SELECT "_id", "text" FROM "{}_index" WHERE "chat_id" = $1 AND "message_id" = $2'''.format(
+                '''SELECT "body" FROM "{}_index" WHERE "chat_id" = $1 AND "message_id" = $2'''.format(
                     'document' if _type != 'text' else 'message'
-                ), (msg.chat.id, msg.message_id))
+                ), msg.chat.id, msg.message_id)
             if sql_obj is not None:
-                if text == sql_obj['text']:
+                if text == sql_obj['body']:
                     return
-                await self.conn.execute('''UPDATE "{}_index" SET "text" = $1 WHERE "_id" = $2'''.format(
-                    'document' if _type != 'text' else 'message'
-                ), (text, sql_obj['_id']))
+                await self.conn.execute(
+                    '''UPDATE "{}_index" SET "body" = $1 WHERE "chat_id" = $2 AND "message_id" = $3'''.format(
+                        'document' if _type != 'text' else 'message'
+                    ), text, msg.chat.id, msg.message_id
+                )
                 if msg.edit_date != 0:
                     await self.conn.execute(
-                        '''INSERT INTO "edit_history" ("chat_id" , "from_user", "message_id", "text", "timestamp") 
+                        '''INSERT INTO "edit_history" ("chat_id" , "from_user", "message_id", "body", "message_date") 
                         VALUES ($1, $2, $3, $4, $5)''',
                         msg.chat.id,
                         msg.from_user.id if msg.from_user else msg.chat.id,
                         msg.message_id,
-                        sql_obj['text'],
+                        sql_obj['body'],
                         datetime.datetime.fromtimestamp(msg.edit_date)
                     )
                 return
@@ -239,8 +242,9 @@ class MsgTrackerThreadClass:
                 msg.forward_from_chat.id if msg.forward_from_chat else None
 
         await self.conn.execute(
-            '''INSERT INTO "index" ("chat_id", "message_id", "from_user", "forward_from", "text", "timestamp")
-             VALUES ($1, $2, $3, $4, $5, $6)''',
+            '''INSERT INTO "message_index" 
+            ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date")
+            VALUES ($1, $2, $3, $4, $5, $6)''',
             msg.chat.id,
             msg.message_id,
             msg.from_user.id if msg.from_user else msg.chat.id,
@@ -250,10 +254,10 @@ class MsgTrackerThreadClass:
         )
         if _type != 'text':
             file_id = self.get_file_id(msg, _type)
-            file_ref = self.get_file_ref(msg, _type)
+            #file_ref = self.get_file_ref(msg, _type)
             await self.conn.execute(
                 '''INSERT INTO "document_index" 
-                ("chat_id", "message_id", "from_user", "forward_from", "text", "timestamp", "type", "file_id") '''
+                ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date", "doc_type", "file_id") '''
                 '''VALUES ($1, $2, $3, $4, $5, $6, $7, $8)''',
                 msg.chat.id,
                 msg.message_id,
@@ -264,16 +268,16 @@ class MsgTrackerThreadClass:
                 _type,
                 file_id
             )
-            if _type == 'photo' and msg.chat.id > 0 and not msg.from_user.is_bot:
-                self.media_downloader.push(file_id, file_ref)
-            if await self.conn.query1('''SELECT "id" FROM "file_ref" WHERE "id" = $1''', file_id) is None:
-                await self.conn.execute(
-                    '''INSERT INTO "file_ref" ("id", "ref") VALUES ($1, $2)''', file_id, file_ref
-                )
-            else:
-                await self.conn.execute(
-                    '''UPDATE "file_ref" SET "ref" = $1 WHERE "id" = $2''', file_ref, file_id
-                )
+            #if _type == 'photo' and msg.chat.id > 0 and not msg.from_user.is_bot:
+            #    self.media_downloader.push(file_id, file_ref)
+            #if await self.conn.query1('''SELECT "id" FROM "file_ref" WHERE "id" = $1''', file_id) is None:
+            #    await self.conn.execute(
+            #        '''INSERT INTO "file_ref" ("id", "ref") VALUES ($1, $2)''', file_id, file_ref
+            #    )
+            #else:
+            #    await self.conn.execute(
+            #        '''UPDATE "file_ref" SET "ref" = $1 WHERE "id" = $2''', file_ref, file_id
+            #    )
 
     # logger.debug('INSERT INTO "index" %d %d %s', msg.chat.id, msg.message_id, text)
 
@@ -442,9 +446,9 @@ class MsgTrackerThreadClass:
     def get_file_id(msg: Message, _type: str) -> str:
         return getattr(msg, _type).file_id
 
-    @staticmethod
-    def get_file_ref(msg: Message, _type: str) -> str:
-        return getattr(msg, _type).file_ref
+    #@staticmethod
+    #def get_file_ref(msg: Message, _type: str) -> str:
+    #    return getattr(msg, _type).file_ref
 
 
 class CheckDuplicateMessage:

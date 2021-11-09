@@ -154,7 +154,8 @@ class HistoryIndex:
     async def pre_process(self, _: Client, msg: Message) -> Optional[NoReturn]:
         # if msg.text and msg.from_user and msg.from_user.id == self.bot_id and msg.text.startswith('/Magic'):
         #     await self.process_magic_function(msg)
-        # if self.check_filter(msg): return
+        if self.check_filter(msg):
+            return
         if msg.chat.id == self.owner:
             return
         raise ContinuePropagation
@@ -175,6 +176,7 @@ class HistoryIndex:
         await asyncio.wait(tasks)
         # TODO: #2
         # await self.index_dialog.recheck()
+        self.logger.debug('Indexer: started.')
 
     # async def get_media(self, msg: Message) -> None:
     #     str_array = msg.text.split()
