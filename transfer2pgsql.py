@@ -87,6 +87,7 @@ async def main() -> None:
             await exec_and_insert(
                 cursor, "SELECT * FROM username_history", pgsql_connection,
                 '''INSERT INTO "username_history" VALUES ($1, $2, $3, $4)   ON CONFLICT DO NOTHING''', bigdata=True)
+
     await pgsql_connection.close()
     mysql_connection.close()
     await mysql_connection.wait_closed()

@@ -35,7 +35,7 @@ from pyrogram.types import Update, Message
 from pyrogram.handlers import MessageHandler, RawUpdateHandler
 
 import task
-from libpy3.aiopgsqldb import PgSQLdb
+from sqlwrap import PgSQLdb
 from spider import IterUserMessages
 
 

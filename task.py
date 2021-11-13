@@ -39,7 +39,7 @@ from pyrogram.raw.types import UpdateDeleteChannelMessages, UpdateDeleteMessages
     UpdateUserName, UpdateUserPhoto
 
 from custom_type import UserProfile
-from libpy3.aiopgsqldb import PgSQLdb
+from sqlwrap import PgSQLdb
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -231,30 +231,32 @@ class MsgTrackerThreadClass:
             if text == '':
                 return
             _type = 'text'
+        file_id = self.get_file_id(msg, _type)
 
         if msg.edit_date is not None:
-            sql_obj = await self.conn.query1(
-                '''SELECT "body" FROM "{}_index" WHERE "chat_id" = $1 AND "message_id" = $2'''.format(
-                    'document' if _type != 'text' else 'message'
-                ), msg.chat.id, msg.message_id)
+            logger.debug('edit message %d %d (%d)', msg.chat.id, msg.message_id, msg.edit_date)
+            if _type == 'text':
+                sql_obj = await self.conn.query1_msg(msg.chat.id, msg.message_id)
+            else:
+                sql_obj = await self.conn.query1_doc(msg.chat.id, msg.message_id)
             if sql_obj is not None:
+                logger.debug('Found message in database')
                 if text == sql_obj['body']:
                     return
-                await self.conn.execute(
-                    '''UPDATE "{}_index" SET "body" = $1 WHERE "chat_id" = $2 AND "message_id" = $3'''.format(
-                        'document' if _type != 'text' else 'message'
-                    ), text, msg.chat.id, msg.message_id
-                )
+                if _type == 'text':
+                    await self.conn.update_msg_body(msg.chat.id, msg.message_id, text)
+                else:
+                    await self.conn.update_doc_body(msg.chat.id, msg.message_id, text, file_id)
                 if msg.edit_date != 0:
-                    await self.conn.execute(
-                        '''INSERT INTO "edit_history" ("chat_id" , "from_user", "message_id", "body", "edit_date") 
-                        VALUES ($1, $2, $3, $4, $5)''',
+                    await self.conn.insert_edit_record(
                         msg.chat.id,
                         msg.from_user.id if msg.from_user else msg.chat.id,
                         msg.message_id,
                         sql_obj['body'],
                         datetime.datetime.fromtimestamp(msg.edit_date)
                     )
+                else:
+                    logger.debug('Find message edit date is 0: %s', repr(msg))
                 return
 
         if msg.forward_sender_name:
@@ -268,9 +270,9 @@ class MsgTrackerThreadClass:
                 msg.forward_from_chat.id if msg.forward_from_chat else None
 
         await self.conn.execute(
-            '''INSERT INTO "message_index" 
-            ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date")
-            VALUES ($1, $2, $3, $4, $5, $6)''',
+            '''INSERT INTO "message_index"
+             ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date")
+             VALUES ($1, $2, $3, $4, $5, $6)''',
             msg.chat.id,
             msg.message_id,
             msg.from_user.id if msg.from_user else msg.chat.id,
@@ -279,12 +281,11 @@ class MsgTrackerThreadClass:
             datetime.datetime.fromtimestamp(msg.date)
         )
         if _type != 'text':
-            file_id = self.get_file_id(msg, _type)
-            #file_ref = self.get_file_ref(msg, _type)
             await self.conn.execute(
-                '''INSERT INTO "document_index" 
-                ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date", "doc_type", "file_id") '''
-                '''VALUES ($1, $2, $3, $4, $5, $6, $7, $8)''',
+                '''INSERT INTO "document_index"
+                 ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date", "doc_type", "file_id")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT ("chat_id", "message_id")
+                 DO UPDATE SET "body" = $5, "file_id" = $8''',
                 msg.chat.id,
                 msg.message_id,
                 msg.from_user.id if msg.from_user else msg.chat.id,
@@ -322,7 +323,8 @@ class MsgTrackerThreadClass:
         if isinstance(update, pyrogram.raw.types.UpdateDeleteMessages):
             sql_obj = None
             for x in update.messages:
-                sql_obj = await self.conn.query1('''SELECT "chat_id" FROM "index" WHERE "message_id" = $1''', x)
+                sql_obj = await self.conn.query1(
+                    '''SELECT "chat_id" FROM "message_index" WHERE "message_id" = $1 AND "chat_id" > 0''', x)
                 if sql_obj:
                     break
             if sql_obj:
@@ -358,7 +360,6 @@ class MsgTrackerThreadClass:
             signal.signal(sig, _reset_idle)
         while not _idle.is_set():
             for future in self.futures:
-                logger.debug('loop %s', future)
                 try:
                     if (e := future.exception(0)) is not None:
                         raise e
@@ -390,15 +391,7 @@ class MsgTrackerThreadClass:
 
     async def _user_tracker(self) -> None:
         while not self.user_queue.empty():
-            u = self.user_queue.get_nowait()
-            try:
-                await self._real_user_index(u)
-            except:
-                self.emergency_mode = True
-                traceback.print_exc()
-                logger.debug('User Object detail => %s', str(u))
-            if self.emergency_mode:
-                await self.emergency_write(u)
+            await self._real_user_index(self.user_queue.get_nowait())
 
     async def insert_username(self, user: User | Chat) -> None:
         if user.username is None:
@@ -499,7 +492,9 @@ class MsgTrackerThreadClass:
             'voice' if msg.voice else 'error'
 
     @staticmethod
-    def get_file_id(msg: Message, _type: str) -> str:
+    def get_file_id(msg: Message, _type: str) -> str | None:
+        if _type == 'text':
+            return None
         return getattr(msg, _type).file_id
 
 
