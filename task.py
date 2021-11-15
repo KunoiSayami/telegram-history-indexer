@@ -27,6 +27,7 @@ import signal
 import time
 import traceback
 from abc import ABCMeta, abstractmethod
+from pathlib import Path
 from typing import Callable
 
 import aiofiles
@@ -68,7 +69,7 @@ class NotifyClass(SendMethod):
         if time.time() - self.last_send < self.interval:
             return False
         try:
-            await self.client.send_message(self.target, f'"{msg}"', 'markdown')
+            await self.client.send_message(self.target, f'```{msg}```', 'markdown')
         except pyrogram.errors.RPCError:
             traceback.print_exc()
         finally:
@@ -77,54 +78,53 @@ class NotifyClass(SendMethod):
 
 
 class MediaDownloader:
-    def __init__(self, client: Client, conn: PgSQLdb):
+    def __init__(self, client: Client, conn: PgSQLdb, stop_signal: asyncio.Event, file_store: Path):
         self.client: Client = client
         self.conn: PgSQLdb = conn
         self.download_queue: asyncio.Queue = asyncio.Queue()
-        self.stop_signal: bool = False
+        self.stop_signal: asyncio.Event = stop_signal
+        self.file_store = file_store
 
-    def push(self, file_id: str, file_ref: str = None):
-        self.download_queue.put_nowait((file_id, file_ref))
+    def push(self, file_id: str, timestamp: datetime.datetime):
+        self.download_queue.put_nowait((file_id, timestamp.replace(microsecond=0)))
 
     def start(self) -> concurrent.futures.Future:
         return asyncio.run_coroutine_threadsafe(self.run(), asyncio.get_event_loop())
 
     async def run(self) -> None:
         logger.debug('Download thread is ready to get file.')
-        while not self.stop_signal:
+        while not self.stop_signal.is_set():
             task = asyncio.create_task(self.download_queue.get())
-            while not self.stop_signal:
+            while not self.stop_signal.is_set():
                 result, _pending = await asyncio.wait([task], timeout=1)
                 if len(result) > 0:
                     await self.download(*result.pop().result())
                     break
-                if self.stop_signal:
+                if self.stop_signal.is_set():
                     task.cancel()
                     return
 
     # TODO: Check function availability
-    async def download(self, file_id: str, file_ref: str) -> None:
-        try:
-            if await self.conn.query1('''SELECT "file_id" FROM "media_store" WHERE "file_id" = $1''',
-                                      file_id) is not None:
+    async def download(self, file_id: str, timestamp: datetime.datetime) -> None:
+        if ret := await self.conn.query_media(file_id):
+            img_path = self.file_store.joinpath('archive', str(ret.year), str(ret.month), f'{file_id}.jpg')
+            if img_path.exists():
                 return
-            try:
-                await self.client.download_media(file_id, 'image.jpg')
-            except pyrogram.errors.RPCError:
-                logger.error('Got rpc error while downloading %s %s', file_id, file_ref)
+        else:
+            img_path = self.file_store.joinpath('archive', str(timestamp.year), str(timestamp.month), f'{file_id}.jpg')
+        if not img_path.parent.exists():
+            img_path.parent.mkdir(parents=True)
+        try:
+            await self.client.download_media(file_id, str(img_path))
 
-            async with aiofiles.open('downloads/image.jpg', 'rb') as fin:
-                # print(file_id)
-                await self.conn.execute(
-                    '''INSERT INTO "media_store" ("file_id", "body") VALUES ($1, $2)''',
-                                        (file_id, await fin.read()))
-        except:
-            logger.exception('Catched exception in MediaDownloadThread')
+        except pyrogram.errors.RPCError:
+            logger.error('Got rpc error while downloading %s(%d)', file_id, timestamp.timestamp())
 
 
 class MsgTrackerThreadClass:
     def __init__(self, client: Client, conn: PgSQLdb, filter_func: Callable[[Message], bool], *,
-                 notify: SendMethod | None = None, other_client: Client | None = None):
+                 notify: SendMethod | None = None, other_client: Client | None = None,
+                 file_store: Path | None = None):
         # super().__init__(daemon=True)
 
         self.msg_queue: asyncio.Queue = asyncio.Queue()
@@ -133,7 +133,6 @@ class MsgTrackerThreadClass:
         self.conn: PgSQLdb = conn
         self.other_client: Client | None = other_client
         self.filter_func: Callable[[Message], bool] = filter_func
-        # self.media_downloader = MediaDownloader(self.client, self.conn)
         if self.other_client is None:
             self.other_client = self.client
         self.notify = notify
@@ -141,17 +140,20 @@ class MsgTrackerThreadClass:
             self.notify = FakeNotifyClass()
         self.emergency_mode: bool = False
         self.futures: list[concurrent.futures.Future] = []
-        self.work: bool = True
+        self.stop_event: asyncio.Event = asyncio.Event()
+        self.file_store = file_store
+        self.media_downloader = MediaDownloader(self.client, self.conn, self.stop_event, self.file_store)
 
     def start(self) -> None:
-        logger.debug('Starting "MsgTrackerThreadClass\'')
+        logger.debug('Starting `MsgTrackerThreadClass\'')
         self.futures.append(asyncio.run_coroutine_threadsafe(self.user_tracker(), asyncio.get_event_loop()))
         self.futures.append(asyncio.run_coroutine_threadsafe(self.run(), asyncio.get_event_loop()))
-        # self.futures.append(self.media_downloader.start())
-        logger.debug('Start "MsgTrackerThreadClass\' successful')
+        if self.file_store is not None:
+            self.futures.append(self.media_downloader.start())
+        logger.debug('Start `MsgTrackerThreadClass\' successful')
 
     async def stop(self) -> None:
-        self.work = False
+        self.stop_event.set()
         notified = False
         logger.info('Waiting all futures to stop.')
         await asyncio.sleep(1)
@@ -179,7 +181,7 @@ class MsgTrackerThreadClass:
         logger.debug('`msg_tracker_thread\' started!')
         while not self.client.is_connected:
             await asyncio.sleep(.05)
-        while self.work:
+        while not self.stop_event.is_set():
             task = asyncio.create_task(self.msg_queue.get())
             while True:
                 done, _pending = await asyncio.wait([task], timeout=1)
@@ -190,7 +192,7 @@ class MsgTrackerThreadClass:
                         logger.exception('Got database exception, raise it.')
                         raise
                     break
-                if not self.work:
+                if self.stop_event.is_set():
                     task.cancel()
                     return
         logger.debug('Exit!')
@@ -234,13 +236,11 @@ class MsgTrackerThreadClass:
         file_id = self.get_file_id(msg, _type)
 
         if msg.edit_date is not None:
-            logger.debug('edit message %d %d (%d)', msg.chat.id, msg.message_id, msg.edit_date)
             if _type == 'text':
                 sql_obj = await self.conn.query1_msg(msg.chat.id, msg.message_id)
             else:
                 sql_obj = await self.conn.query1_doc(msg.chat.id, msg.message_id)
             if sql_obj is not None:
-                logger.debug('Found message in database')
                 if text == sql_obj['body']:
                     return
                 if _type == 'text':
@@ -269,17 +269,19 @@ class MsgTrackerThreadClass:
             forward_from_id = msg.forward_from.id if msg.forward_from else \
                 msg.forward_from_chat.id if msg.forward_from_chat else None
 
-        await self.conn.execute(
-            '''INSERT INTO "message_index"
-             ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date")
-             VALUES ($1, $2, $3, $4, $5, $6)''',
-            msg.chat.id,
-            msg.message_id,
-            msg.from_user.id if msg.from_user else msg.chat.id,
-            forward_from_id,
-            text,
-            datetime.datetime.fromtimestamp(msg.date)
-        )
+        try:
+            await self.conn.insert_message(
+                msg.chat.id,
+                msg.message_id,
+                msg.from_user.id if msg.from_user else msg.chat.id,
+                forward_from_id,
+                text,
+                datetime.datetime.fromtimestamp(msg.date)
+            )
+        except asyncpg.UniqueViolationError:
+            result = await self.conn.query1_msg(msg.chat.id, msg.message_id)
+            logger.debug('Found unique violation error, %d %d %s', msg.chat.id, msg.message_id, str(result))
+
         if _type != 'text':
             await self.conn.execute(
                 '''INSERT INTO "document_index"
@@ -295,16 +297,8 @@ class MsgTrackerThreadClass:
                 _type,
                 file_id
             )
-            #if _type == 'photo' and msg.chat.id > 0 and not msg.from_user.is_bot:
-            #    self.media_downloader.push(file_id, file_ref)
-            #if await self.conn.query1('''SELECT "id" FROM "file_ref" WHERE "id" = $1''', file_id) is None:
-            #    await self.conn.execute(
-            #        '''INSERT INTO "file_ref" ("id", "ref") VALUES ($1, $2)''', file_id, file_ref
-            #    )
-            #else:
-            #    await self.conn.execute(
-            #        '''UPDATE "file_ref" SET "ref" = $1 WHERE "id" = $2''', file_ref, file_id
-            #    )
+            if msg.photo and (msg.from_user and not msg.from_user.is_bot):
+                self.media_downloader.push(file_id, datetime.datetime.fromtimestamp(msg.date))
 
     # logger.debug('INSERT INTO "index" %d %d %s', msg.chat.id, msg.message_id, text)
 
@@ -376,10 +370,10 @@ class MsgTrackerThreadClass:
         logger.debug('`user_tracker\' started!')
         while not self.client.is_connected:
             await asyncio.sleep(.1)
-        while self.work:
+        while not self.stop_event.is_set():
             while self.user_queue.empty():
                 await asyncio.sleep(.1)
-                if not self.work:
+                if self.stop_event.is_set():
                     break
             await self._user_tracker()
         if not self.user_queue.empty():
@@ -433,8 +427,8 @@ class MsgTrackerThreadClass:
                 peer_id,
             )
             await user_profile.exec_sql(self.conn)
-            #if user_profile.photo_id:
-            #    self.media_downloader.push(user_profile.photo_id)
+            if user_profile.photo_id:
+                self.media_downloader.push(user_profile.photo_id, datetime.datetime.now())
             return True
         if peer_id != sql_obj['peer_id']:
             await self.conn.execute(
@@ -453,8 +447,8 @@ class MsgTrackerThreadClass:
                 user_profile.user_id,
             )
             await user_profile.exec_sql(self.conn)
-            #if user_profile.photo_id:
-            #    self.media_downloader.push(user_profile.photo_id)
+            if user_profile.photo_id:
+                self.media_downloader.push(user_profile.photo_id, datetime.datetime.now())
             return True
         elif enable_request and (datetime.datetime.now() - sql_obj['last_refresh']).total_seconds() > 3600:
             u = await self.client.get_users(user.id) if isinstance(user, User) else await self.client.get_chat(user.id)

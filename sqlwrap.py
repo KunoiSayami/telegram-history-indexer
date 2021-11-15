@@ -46,7 +46,7 @@ class PgSQLdb(_PgSQLdb):
                                  message_id: int, body: str, edit_date: datetime.datetime):
         await self.execute(
             '''INSERT INTO "edit_history" ("chat_id" , "from_user", "message_id", "body", "edit_date") 
-            VALUES ($1, $2, $3, $4, $5)''',
+             VALUES ($1, $2, $3, $4, $5)''',
             chat_id,
             from_user,
             message_id,
@@ -66,8 +66,39 @@ class PgSQLdb(_PgSQLdb):
         await asyncio.gather(
             self.execute(
                 '''UPDATE "document_index" SET "body" = $1, "file_id" = $2 
-                WHERE "chat_id" = $3 AND "message_id" = $4''',
+                 WHERE "chat_id" = $3 AND "message_id" = $4''',
                 body, file_id, chat_id, message_id
             ),
             self.update_msg_body(chat_id, message_id, body)
         )
+
+    async def insert_message(self, chat_id: int, message_id: int, from_user: int, forward_from: int,
+                             body: str, message_date: datetime.datetime) -> None:
+
+        await self.execute(
+            '''INSERT INTO "message_index"
+             ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date")
+             VALUES ($1, $2, $3, $4, $5, $6)''',
+            chat_id,
+            message_id,
+            from_user,
+            forward_from,
+            body,
+            message_date
+        )
+
+    async def insert_media(self, file_id: str, timestamp: datetime.datetime) -> None:
+        await self.execute(
+            '''INSERT INTO "media_mapping" VALUES ($1, $2)''',
+            file_id,
+            timestamp
+        )
+
+    async def query_media(self, file_id: str) -> datetime.datetime | None:
+        ret = await self.query1(
+            '''SELECT "media_time" FROM "media_mapping" WHERE "file_id" = $1''',
+            file_id
+        )
+        if ret:
+            return ret['media_time']
+        return None

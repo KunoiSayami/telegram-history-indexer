@@ -15,3 +15,7 @@ database =
 [filters]
 chat =
 user =
+
+[file_store]
+enable = false
+location =

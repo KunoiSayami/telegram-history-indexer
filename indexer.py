@@ -22,6 +22,7 @@ import ast
 import asyncio
 import logging
 import os
+import pathlib
 import signal
 from configparser import ConfigParser
 from dataclasses import dataclass
@@ -87,13 +88,24 @@ class HistoryIndex:
 
         self.bot_id = int(config.get('account', 'indexbot_token').split(':')[0])
 
-        self.media_lookup_channel = config.getint('account', 'media_send_target')
+        # self.media_lookup_channel = config.getint('account', 'media_send_target')
+
+        if config.getboolean('file_store', 'enable', fallback=False):
+            file_store = pathlib.Path(config.get('file_store', 'location'))
+            if not file_store.exists():
+                self.logger.info("Can't find %s, create it.", str(file_store))
+                file_store.mkdir()
+        else:
+            file_store = None
+
+
         self.trackers = task.MsgTrackerThreadClass(
             self.client,
             self.conn,
             self.check_filter,
             notify=task.NotifyClass(self.other_client, self.owner),
             other_client=self.other_client,
+            file_store=file_store
         )
 
         self.client.add_handler(MessageHandler(self.pre_process), 888)
@@ -145,7 +157,7 @@ class HistoryIndex:
             return self.trackers.push_no_user(update)
 
     async def stop(self) -> None:
-        def sigkill(*args):
+        def sigkill(*_args):
             os.kill(os.getpid(), signal.SIGKILL)
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, sigkill)

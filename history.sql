@@ -157,6 +157,18 @@ CREATE TABLE public.group_history (
 ALTER TABLE public.group_history OWNER TO postgres;
 
 --
+-- Name: media_mapping; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.media_mapping (
+    file_id character varying(120) NOT NULL,
+    media_time timestamp without time zone NOT NULL
+);
+
+
+ALTER TABLE public.media_mapping OWNER TO postgres;
+
+--
 -- Name: message_index; Type: TABLE; Schema: public; Owner: postgres
 --
 
@@ -345,6 +357,14 @@ ALTER TABLE ONLY public.edit_history
 
 ALTER TABLE ONLY public.group_history
     ADD CONSTRAINT group_history_pk PRIMARY KEY (chat_id, message_id);
+
+
+--
+-- Name: media_mapping media_mapping_pk; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.media_mapping
+    ADD CONSTRAINT media_mapping_pk PRIMARY KEY (file_id);
 
 
 --
