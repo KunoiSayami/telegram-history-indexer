@@ -17,197 +17,165 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
+from __future__ import annotations
 import asyncio
-import concurrent.futures
 import logging
-import traceback
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Callable
 
-import asyncpg.exceptions
 import pyrogram.errors
-from pyrogram.types import Dialog, Message, User
+from pyrogram import Client
+from pyrogram.types import Message, User, Chat
+
+import sqlwrap
+import utils
+from custom_type import UserProfile
 
 
-class IterUserMessages:
-    def __init__(self, indexer):
+class IndexUserMessages:
+    MAGIC_ALL_USER_DIALOG_INDEXED = -7
+    MAGIC_ALL_GROUP_OR_CHANNEL_INDEXED = -2
+    MAGIC_INIT_FLAG = -6
+
+    def __init__(self, client: Client, conn: sqlwrap.PgSQLdb, user_checker: Callable[[User], None]):
 
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.DEBUG)
 
-        self.client = indexer.client
-        self.conn = indexer.conn
-        self.indexer = indexer
-        self.end_time = 0
+        self.client = client
+        self.conn = conn
+        self.user_checker = user_checker
+        self.end_time = None
 
-    def run(self):
-        self.get_dialogs()
-        self.process_messages()
-
-    async def _identify_user(self, users: List[User]):
-        user_infos = await self.client.get_users(users)
-        for x in user_infos:
-            self.indexer.trackers.user_queue.put_nowait(x)
-
-    async def identify_user(self):
-        sql_obj = await self.conn.query(
-            '''SELECT "user_id" FROM "indexed_dialogs" WHERE "user_id" > 1'''
-        )
-        users = [x['user_id'] for x in sql_obj]
-        while len(users) > 200:
-            await self._identify_user(users[:200])
-            users = users[200:]
-        await self._identify_user(users)
-
-    async def get_dialogs(self):
-        sql_obj = await self.conn.query1(
-            '''SELECT "last_message_id", "indexed" FROM "indexed_dialogs" WHERE "user_id" = -1'''
-        )
-        if sql_obj is None:
-            offset_date, switch = 0, True
-        else:
-            offset_date, switch = sql_obj['last_message_id'], not sql_obj['indexed']
-        while switch:
-            try:
-                dialogs = await self.client.get_dialogs(offset_date)
-                await self.process_dialogs(dialogs, sql_obj)
-                await asyncio.sleep(5)
-                offset_date = dialogs[-1].top_message.date - 1
-                sql_obj = await self.conn.query1(
-                    '''SELECT "last_message_id", "indexed" FROM "indexed_dialogs" WHERE "user_id" = -1'''
-                )
-            except pyrogram.errors.FloodWait as e:
-                self.logger.warning('Caught Flood wait, wait %d seconds', e.x)
-                await asyncio.sleep(e.x)
-            except IndexError:
-                break
-        if switch:
-            await self.identify_user()
-        self.logger.debug('Search over')
-
-    async def process_dialogs(self, dialogs: List[Dialog], sql_obj: Optional[Dict]):
-        for dialog in dialogs:
-            try:
-                await self.conn.execute(
-                    '''INSERT INTO "indexed_dialogs" ("user_id", "last_message_id") VALUES ($1, $2)''',
-                    dialog.chat.id, dialog.top_message.message_id
-                )
-            except asyncpg.exceptions.PostgresError:
-                print(traceback.format_exc().splitlines()[-1])
-            await self.indexer.user_profile_track(dialog.top_message)
-        try:
-            if sql_obj:
-                await self.conn.execute(
-                    '''UPDATE "indexed_dialogs" SET "last_message_id" = $1 WHERE "user_id" = -1''',
-                    dialogs[-1].top_message.date - 1
-                )
-            else:
-                # If None
-                await self.conn.execute(
-                    '''INSERT INTO "indexed_dialogs" ("user_id", "last_message_id") VALUES ($1, $2)''',
-                    -1, dialogs[-1].top_message.date - 1
-                )
-        except IndexError:
-            if sql_obj:
-                await self.conn.execute(
-                    '''UPDATE "indexed_dialogs" SET "indexed" = true WHERE "user_id" = -1'''
-                )
-            else:
-                await self.conn.execute(
-                    '''INSERT INTO "indexed_dialogs" ("user_id","indexed", "last_message_id") VALUES (-1, true, 0)'''
-                )
-            raise
-
-    async def process_messages(self) -> None:
-        while True:
-            sql_obj = await self.conn.query1(
-                '''SELECT * FROM "indexed_dialogs" WHERE "indexed" = false AND "user_id" > 1 LIMIT 1'''
-            )
-            if sql_obj is None:
-                break
-            if await self.conn.query1(
-                    '''SELECT * FROM "user_index" WHERE "user_id" = $1 AND "is_bot" = true ''', sql_obj['user_id']
-            ):
-                self.conn.execute(
-                    '''UPDATE "indexed_dialogs" SET "indexed" = true WHERE "user_id" = $1''',
-                    sql_obj['user_id']
-                )
-                continue
-            await self.conn.execute(
-                '''UPDATE "indexed_dialogs" SET "started_indexed" = true WHERE "user_id" = %s''',
-                sql_obj['user_id']
-            )
-            await self._process_messages(sql_obj['user_id'], sql_obj['last_message_id'])
-            await self.conn.execute(
-                '''UPDATE "indexed_dialogs" SET "indexed" = true WHERE "user_id" = %s''', sql_obj['user_id'])
-
-    async def _process_messages(self, user_id: int, offset_id: int, *, force_check: bool = False) -> None:
-        while offset_id > 1:
-            self.logger.debug('Current process %d %d', user_id, offset_id)
-            while True:
-                try:
-                    msg_his = await self.client.get_history(user_id, offset_id=offset_id)
-                    break
-                except pyrogram.errors.FloodWait as e:
-                    self.logger.warning('got FloodWait, wait %d seconds', e.x)
-                    await asyncio.sleep(e.x)
-            if self.__process_messages(msg_his, force_check):
-                break
-            try:
-                offset_id = msg_his[-1].message_id - 1
-            except IndexError:
-                break
-            await asyncio.sleep(5)
-
-    def __process_messages(self, msg_group: List[Message], force_check: bool = False) -> bool:
-        for x in msg_group:
-            if force_check:
-                x.edit_date = 0
-            self.indexer.trackers.msg_queue.put_nowait(x)
-            if x.date < self.end_time:
-                return True
-        return False
-
-    async def recheck(self, force_check: bool = False) -> None:
-        sql_obj = await self.conn.query1('''SELECT "timestamp" FROM "index" ORDER BY "timestamp" DESC LIMIT 1''')
-        self.logger.debug('Rechecking...')
-        if force_check or (sql_obj and (datetime.now() - sql_obj['timestamp']).total_seconds() > 60 * 30):
-            if isinstance(self.end_time, int) and self.end_time == 0:
-                self.end_time = sql_obj['timestamp'].replace(tzinfo=timezone.utc).timestamp()
-            if isinstance(self.end_time, datetime):
-                self.end_time = self.end_time.replace(tzinfo=timezone.utc).timestamp()
-
-            self.logger.info('Calling recheck function')
-            self.logger.debug('End time is %d', self.end_time)
-
-            self.bootstrap_recheck()
-
-            self.logger.debug('Recheck function start successful')
-        else:
-            self.logger.info('Nothing to recheck')
-
-    def bootstrap_recheck(self) -> concurrent.futures.Future:
-        return asyncio.run_coroutine_threadsafe(self._recheck(), asyncio.get_event_loop())
-
-    async def _recheck(self):
+    async def run(self):
         while not self.client.is_connected:
             await asyncio.sleep(0.01)
-        offset_date = 0
-        chats = []
-        while True:
+        self.logger.debug('Running reindex function')
+        await self.init()
+        await self.reindex()
+
+    async def init(self) -> None:
+        ret = await self.conn.query_last_index_message(self.MAGIC_INIT_FLAG)
+        if ret and ret.is_indexed:
+            return
+        self.logger.debug('initializing spider database')
+        await self.conn.insert_last_index_message(self.MAGIC_INIT_FLAG, 0, False)
+
+        # TODO: No flood wait here, is this ok?
+        async for dialog in self.client.iter_dialogs(offset_date=ret.last_message_id if ret else 0):
+            await self.conn.insert_last_index_message(dialog.chat.id, dialog.top_message.message_id)
+            if not dialog.is_pinned:
+                await self.conn.update_last_index_message(self.MAGIC_INIT_FLAG, dialog.top_message.date)
+
+        await self.conn.update_last_index_message_flag(self.MAGIC_INIT_FLAG, True)
+        self.logger.info('Spider database initialized')
+
+    async def process_each_dialog(self) -> bool:
+        self.logger.debug('Process each dialogs')
+        current_dialog = await self.conn.query_last_not_index_chat()
+        if current_dialog is None:
+            return True
+        while current_dialog:
+            await self.index_dialog(current_dialog)
+            current_dialog = await self.conn.query_last_not_index_chat()
+        return False
+
+    async def index_dialog(self, dialog: sqlwrap.MessageIndex, date_limit: int = 0) -> None:
+        self.logger.info('Reindexing %d', dialog.chat_id)
+        offset_id = dialog.last_message_id
+        if isinstance(chat := await self.client.get_chat(dialog.chat_id), Chat):
+            self.user_checker(chat)
+        apply_date_limit = True
+        if date_limit > 0 and \
+                await self.conn.query_count_before_date(datetime.fromtimestamp(date_limit)) > 100:
+            self.logger.info("Can't find message before specify date, query full history")
+            apply_date_limit = True
+        while offset_id > 1:
+            while True:
+                try:
+                    hist = await self.client.get_history(dialog.chat_id, offset_id=offset_id)
+                    await self.conn.insert_many_message([self.parse_msg(msg) for msg in hist])
+                    doc_msgs = []
+                    for msg in hist:
+                        if msg.media and (ret := self.parse_document_msg(msg)):
+                            doc_msgs.append(ret)
+                    if len(doc_msgs):
+                        await self.conn.insert_many_documents(doc_msgs)
+                    await self.conn.update_last_index_message(dialog.chat_id, offset_id)
+                    break
+                except pyrogram.errors.FloodWait as e:
+                    self.logger.warning('Got FloodWait, wait %d seconds', e.x)
+                    await asyncio.sleep(e.x)
+                    continue
+            if dialog.chat_id < 0:
+                users = set()
+                for msg in hist:
+                    _users = list(set(
+                        UserProfile(x) for x in
+                        [msg.from_user, msg.chat, msg.forward_from, msg.forward_from_chat, msg.via_bot]))
+                    for user in _users:
+                        users.add(user)
+                for user in users:
+                    if user is None:
+                        continue
+                    self.user_checker(user.raw)
             try:
-                dialogs = await self.client.get_dialogs(offset_date)
-                for x in dialogs.dialogs:
-                    if x.top_message.date < self.end_time:
-                        raise IndexError
-                    chats.append((x.chat.id, x.top_message.message_id))
-                offset_date = dialogs.dialogs[-1].top_message.date - 1
-            except pyrogram.errors.FloodWait as e:
-                self.logger.warning('Caught Flood wait, wait %d seconds', e.x)
-                await asyncio.sleep(e.x)
+                if apply_date_limit and hist[-1].date < date_limit:
+                    break
+                offset_id = hist[-1].message_id - 1
             except IndexError:
                 break
-        self.logger.info('Find %d chats', len(chats))
-        self.logger.debug('chats (%s)', repr(chats))
-        for x in chats:
-            await self._process_messages(x[0], x[1], force_check=True)
+            print(f'\r{dialog.chat_id}', f'{offset_id:6}', end='')
+        print()
+        await self.conn.update_last_index_message_flag(dialog.chat_id, True)
+        self.logger.info('Index %d completed', dialog.chat_id)
+
+    @classmethod
+    def parse_document_msg(cls, msg: Message) -> tuple[int, int, int, int | None, str, str, str, datetime] | tuple[
+        int, int, int, int | None, str, datetime
+    ] | None:
+        _type = utils.get_msg_type(msg)
+        if _type == 'text':
+            return None
+        base = cls.parse_msg(msg)
+        if _type == 'error':
+            return None
+        file_id = utils.get_file_id(msg, _type)
+        return *base[:4], msg.caption, _type, file_id, base[-1],
+
+    @classmethod
+    def parse_msg(cls, msg: Message) -> tuple[int, int, int, int | None, str, datetime]:
+        text = msg.text if not msg.media else msg.caption
+        if text is None:
+            text = ''
+        return (
+            msg.chat.id,
+            msg.message_id,
+            msg.from_user.id if msg.from_user else msg.chat.id,
+            cls.get_forward_from(msg),
+            text,
+            datetime.fromtimestamp(msg.date)
+        )
+
+    @staticmethod
+    def get_forward_from(msg: Message) -> int | None:
+        if msg.forward_sender_name:
+            forward_from_id = -1001228946795
+        else:
+            forward_from_id = msg.forward_from.id if msg.forward_from else \
+                msg.forward_from_chat.id if msg.forward_from_chat else None
+        return forward_from_id
+
+    async def reindex(self) -> None:
+        if self.end_time is None:
+            date = int((await self.conn.query_last_record_message_date()).timestamp())
+        else:
+            self.logger.debug('Override last record message time to: %d', self.end_time)
+            date = self.end_time
+        if date is None:
+            return
+        offset_date = date - 600
+        async for dialog in self.client.iter_dialogs():
+            await self.index_dialog(sqlwrap.MessageIndex.from_dialog(dialog), offset_date)
+            if dialog.top_message.date < offset_date:
+                break

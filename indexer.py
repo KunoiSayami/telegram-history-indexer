@@ -37,7 +37,6 @@ from pyrogram.handlers import MessageHandler, RawUpdateHandler
 
 import task
 from sqlwrap import PgSQLdb
-from spider import IterUserMessages
 
 
 @dataclass
@@ -98,7 +97,6 @@ class HistoryIndex:
         else:
             file_store = None
 
-
         self.trackers = task.MsgTrackerThreadClass(
             self.client,
             self.conn,
@@ -111,9 +109,6 @@ class HistoryIndex:
         self.client.add_handler(MessageHandler(self.pre_process), 888)
         self.client.add_handler(MessageHandler(self.handle_all_message), 888)
         self.client.add_handler(RawUpdateHandler(self.handle_raw_update), 999)
-
-        # TODO: Check this function availability #2
-        #self.index_dialog = IterUserMessages(self)
 
         self.logger.info('History indexer initialize success')
 
@@ -194,8 +189,6 @@ class HistoryIndex:
         tasks.append(asyncio.create_task(self.client.start()))
         self.logger.debug('telegram client: login.')
         await asyncio.wait(tasks)
-        # TODO: #2
-        # await self.index_dialog.recheck()
         self.logger.debug('Indexer: started.')
         return True
 

@@ -41,6 +41,8 @@ from pyrogram.raw.types import UpdateDeleteChannelMessages, UpdateDeleteMessages
 
 from custom_type import UserProfile
 from sqlwrap import PgSQLdb
+from spider import IndexUserMessages
+import utils
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -103,6 +105,7 @@ class MediaDownloader:
                 if self.stop_signal.is_set():
                     task.cancel()
                     return
+        logger.debug('Download thread stopped!')
 
     # TODO: Check function availability
     async def download(self, file_id: str, timestamp: datetime.datetime) -> None:
@@ -116,7 +119,8 @@ class MediaDownloader:
             img_path.parent.mkdir(parents=True)
         try:
             await self.client.download_media(file_id, str(img_path))
-
+        except pyrogram.errors.UnknownError:
+            logger.exception('Got Unknown error')
         except pyrogram.errors.RPCError:
             logger.error('Got rpc error while downloading %s(%d)', file_id, timestamp.timestamp())
 
@@ -143,9 +147,11 @@ class MsgTrackerThreadClass:
         self.stop_event: asyncio.Event = asyncio.Event()
         self.file_store = file_store
         self.media_downloader = MediaDownloader(self.client, self.conn, self.stop_event, self.file_store)
+        self.index_dialog = IndexUserMessages(self.client, self.conn, self.push_user)
 
     def start(self) -> None:
         logger.debug('Starting `MsgTrackerThreadClass\'')
+        self.futures.append(asyncio.run_coroutine_threadsafe(self.index_dialog.run(), asyncio.get_event_loop()))
         self.futures.append(asyncio.run_coroutine_threadsafe(self.user_tracker(), asyncio.get_event_loop()))
         self.futures.append(asyncio.run_coroutine_threadsafe(self.run(), asyncio.get_event_loop()))
         if self.file_store is not None:
@@ -189,7 +195,7 @@ class MsgTrackerThreadClass:
                     try:
                         await self.filter_msg(done.pop().result())
                     except asyncpg.PostgresError:
-                        logger.exception('Got database exception, raise it.')
+                        logger.error('Got database exception, raise it.')
                         raise
                     break
                 if self.stop_event.is_set():
@@ -204,14 +210,8 @@ class MsgTrackerThreadClass:
             return
         try:
             await self._filter_msg(msg)
-        except:
-            self.emergency_mode = True
+        except (pyrogram.errors.RPCError, asyncpg.PostgresError):
             await self.notify.send(traceback.format_exc())
-            traceback.print_exc()
-        else:
-            self.emergency_mode = False
-        if self.emergency_mode:
-            await self.emergency_write(msg)
 
     async def _filter_msg(self, msg: Message) -> None:
         if msg.new_chat_members:
@@ -228,12 +228,12 @@ class MsgTrackerThreadClass:
         if text.startswith('/') and not text.startswith('//'):
             return
 
-        _type = self.get_msg_type(msg)
+        _type = utils.get_msg_type(msg)
         if _type == 'error':
             if text == '':
                 return
             _type = 'text'
-        file_id = self.get_file_id(msg, _type)
+        file_id = utils.get_file_id(msg, _type)
 
         if msg.edit_date is not None:
             if _type == 'text':
@@ -283,6 +283,7 @@ class MsgTrackerThreadClass:
             logger.debug('Found unique violation error, %d %d %s', msg.chat.id, msg.message_id, str(result))
 
         if _type != 'text':
+            # FIXME: FIX THE FXXK WRONG ORDER
             await self.conn.execute(
                 '''INSERT INTO "document_index"
                  ("chat_id", "message_id", "from_user", "forward_from", "body", "message_date", "doc_type", "file_id")
@@ -379,10 +380,6 @@ class MsgTrackerThreadClass:
         if not self.user_queue.empty():
             await self._user_tracker()
 
-    async def emergency_write(self, obj: Message) -> None:
-        async with aiofiles.open(f'emergency_{"msg" if isinstance(obj, Message) else "user"}.bk', 'a') as fout:
-            await fout.write(repr(obj) + '\n')
-
     async def _user_tracker(self) -> None:
         while not self.user_queue.empty():
             await self._real_user_index(self.user_queue.get_nowait())
@@ -403,6 +400,8 @@ class MsgTrackerThreadClass:
         )
 
     async def _real_user_index(self, user: User | Chat, *, enable_request: bool = False) -> bool:
+        if user is None:
+            return False
         await self.insert_username(user)
         sql_obj = await self.conn.query1('''SELECT * FROM "user_index" WHERE "user_id" = $1''', user.id)
         user_profile = UserProfile(user)
@@ -476,25 +475,9 @@ class MsgTrackerThreadClass:
         for x in users:
             self.push_user(x)
 
-    @staticmethod
-    def get_msg_type(msg: Message) -> str:
-        return 'photo' if msg.photo else \
-            'video' if msg.video else \
-            'animation' if msg.animation else \
-            'document' if msg.document else \
-            'text' if msg.text else \
-            'voice' if msg.voice else 'error'
-
-    @staticmethod
-    def get_file_id(msg: Message, _type: str) -> str | None:
-        if _type == 'text':
-            return None
-        return getattr(msg, _type).file_id
-
 
 class CheckDuplicateMessage:
     def __init__(self, conn: PgSQLdb, delete: bool = False):
-        # threading.Thread.__init__(self, daemon = True)
         self.msg: list[int] = []
         self.conn: PgSQLdb = conn
         self.delete: bool = delete

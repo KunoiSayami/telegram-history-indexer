@@ -64,10 +64,11 @@ class UserProfile(SimpleUserProfile):
 
         if self.full_name is None:
             warnings.warn(
-                'Caught None first name',
+                f'Caught None first name: {self.user_id}',
                 RuntimeWarning
             )
             self.full_name: str = ''
+            self.first_name = ''
 
         self.hash = hashlib.sha256(','.join((
             str(self.user_id),
@@ -104,6 +105,7 @@ class UserProfile(SimpleUserProfile):
     async def exec_sql(self, instance: libpy3.aiopgsqldb.PgSQLdb) -> None:
         await instance.execute(self.sql_insert[0], *self.sql_insert[1])
 
+
 class HashableUser:
     def __init__(self,
                  user_id: int,
@@ -124,6 +126,8 @@ class HashableUser:
         return hash(self.user_id)
 
     def __eq__(self, user_obj: HashableUser) -> bool:
+        if user_obj is None:
+            return False
         return self.user_id == user_obj.user_id
 
 
