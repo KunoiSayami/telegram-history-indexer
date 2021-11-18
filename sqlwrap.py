@@ -199,5 +199,7 @@ class PgSQLdb(_PgSQLdb):
             return ret['message_date']
         return None
 
-    async def query_count_before_date(self, date: datetime.datetime) -> int:
-        return await self.query1('''SELECT COUNT(*) FROM "message_index" WHERE "message_date" < $1''', date)['COUNT(*)']
+    async def query_count_before_date(self, chat_id: int, date: datetime.datetime) -> int:
+        return (await self.query1(
+            '''SELECT COUNT(*) FROM "message_index" WHERE "message_date" < $1 AND "chat_id" = $2''',
+            date, chat_id))['count']

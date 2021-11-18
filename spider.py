@@ -45,14 +45,14 @@ class IndexUserMessages:
         self.client = client
         self.conn = conn
         self.user_checker = user_checker
-        self.end_time = None
+        self.end_time: int = 0
 
     async def run(self):
         while not self.client.is_connected:
             await asyncio.sleep(0.01)
         self.logger.debug('Running reindex function')
         await self.init()
-        await self.reindex()
+        await self.process_each_dialog()
 
     async def init(self) -> None:
         ret = await self.conn.query_last_index_message(self.MAGIC_INIT_FLAG)
@@ -76,7 +76,7 @@ class IndexUserMessages:
         if current_dialog is None:
             return True
         while current_dialog:
-            await self.index_dialog(current_dialog)
+            await self.index_dialog(current_dialog, self.end_time)
             current_dialog = await self.conn.query_last_not_index_chat()
         return False
 
@@ -87,9 +87,10 @@ class IndexUserMessages:
             self.user_checker(chat)
         apply_date_limit = True
         if date_limit > 0 and \
-                await self.conn.query_count_before_date(datetime.fromtimestamp(date_limit)) > 100:
+                await self.conn.query_count_before_date(
+                    dialog.chat_id, datetime.fromtimestamp(date_limit)) < 100:
             self.logger.info("Can't find message before specify date, query full history")
-            apply_date_limit = True
+            apply_date_limit = False
         while offset_id > 1:
             while True:
                 try:
@@ -122,7 +123,7 @@ class IndexUserMessages:
             try:
                 if apply_date_limit and hist[-1].date < date_limit:
                     break
-                offset_id = hist[-1].message_id - 1
+                offset_id = hist[-1].message_id
             except IndexError:
                 break
             print(f'\r{dialog.chat_id}', f'{offset_id:6}', end='')

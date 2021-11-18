@@ -63,10 +63,16 @@ class UserProfile(SimpleUserProfile):
                 if self.last_name else self.first_name
 
         if self.full_name is None:
-            warnings.warn(
-                f'Caught None first name: {self.user_id}',
-                RuntimeWarning
-            )
+            if isinstance(user, User):
+                if not user.is_deleted:
+                    warnings.warn(
+                        f'Caught None first name: {self.user_id}',
+                        RuntimeWarning
+                    )
+            else:
+                warnings.warn(
+                    f'Caught None first name Chat: {self.user_id}'
+                )
             self.full_name: str = ''
             self.first_name = ''
 
