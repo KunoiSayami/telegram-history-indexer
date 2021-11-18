@@ -194,7 +194,7 @@ class PgSQLdb(_PgSQLdb):
                 yield item['chat_id']
 
     async def query_last_record_message_date(self) -> datetime.datetime | None:
-        ret = await self.query1('''SELECT "message_date" FROM "message_index" ORDER BY "message_date" LIMIT 1''')
+        ret = await self.query1('''SELECT "message_date" FROM "message_index" ORDER BY "message_date" DESC LIMIT 1''')
         if ret:
             return ret['message_date']
         return None
@@ -203,3 +203,17 @@ class PgSQLdb(_PgSQLdb):
         return (await self.query1(
             '''SELECT COUNT(*) FROM "message_index" WHERE "message_date" < $1 AND "chat_id" = $2''',
             date, chat_id))['count']
+
+    async def query_media_date(self, file_id: str) -> datetime.datetime | None:
+        ret = await self.query1(
+            '''SELECT "media_time" FROM "media_mapping" WHERE "file_id" = $1 AND "archive" = false''',
+            file_id)
+        if ret:
+            return ret['media_time']
+        return None
+
+    async def update_media_archive_flag(self, file_id: str, flag: bool) -> None:
+        await self.execute(
+            '''UPDATE "media_mapping" SET "archive" = $1 WHERE "file_id" = $2''', flag, file_id
+        )
+

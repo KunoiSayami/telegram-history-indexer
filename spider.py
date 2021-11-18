@@ -52,7 +52,7 @@ class IndexUserMessages:
             await asyncio.sleep(0.01)
         self.logger.debug('Running reindex function')
         await self.init()
-        await self.process_each_dialog()
+        await self.reindex()
 
     async def init(self) -> None:
         ret = await self.conn.query_last_index_message(self.MAGIC_INIT_FLAG)
@@ -168,8 +168,9 @@ class IndexUserMessages:
         return forward_from_id
 
     async def reindex(self) -> None:
-        if self.end_time is None:
+        if self.end_time == 0:
             date = int((await self.conn.query_last_record_message_date()).timestamp())
+            self.logger.debug('Last message timestamp is %d', date)
         else:
             self.logger.debug('Override last record message time to: %d', self.end_time)
             date = self.end_time

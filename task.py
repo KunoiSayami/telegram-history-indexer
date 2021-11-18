@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import datetime
-import hashlib
 import logging
 import signal
 import time
@@ -30,7 +29,6 @@ from abc import ABCMeta, abstractmethod
 from pathlib import Path
 from typing import Callable
 
-import aiofiles
 import asyncpg
 import pyrogram
 import pyrogram.errors
@@ -107,7 +105,6 @@ class MediaDownloader:
                     return
         logger.debug('Download thread stopped!')
 
-    # TODO: Check function availability
     async def download(self, file_id: str, timestamp: datetime.datetime) -> None:
         if ret := await self.conn.query_media(file_id):
             img_path = self.file_store.joinpath('archive', str(ret.year), str(ret.month), f'{file_id}.jpg')
@@ -215,7 +212,6 @@ class MsgTrackerThreadClass:
 
     async def _filter_msg(self, msg: Message) -> None:
         if msg.new_chat_members:
-            # TODO: Check execute many
             await self.conn.execute(
                 '''INSERT INTO "group_history" 
                 ("chat_id", "user_id", "message_id", "history_date") VALUES ($1, $2, $3, $4)''',
@@ -300,15 +296,27 @@ class MsgTrackerThreadClass:
             )
             if msg.photo and (msg.from_user and not msg.from_user.is_bot):
                 self.media_downloader.push(file_id, datetime.datetime.fromtimestamp(msg.date))
+        # logger.debug("INSERT TO \"index\" %d %d %s", msg.chat.id, msg.message_id, text)
 
-    # logger.debug('INSERT INTO "index" %d %d %s', msg.chat.id, msg.message_id, text)
-
-    async def _insert_delete_record(self, chat_id: int, msgs: list) -> None:
+    async def _insert_delete_record(self, chat_id: int, msgs: list[int]) -> None:
         sz = [(chat_id, x) for x in msgs]
         await self.conn.execute(
             '''INSERT INTO "deleted_message" ("chat_id", "message_id") VALUES ($1, $2)''',
             sz, many=True
         )
+        base = Path('archive')
+        archive = Path('deleted')
+        for message_id in msgs:
+            if ret := await self.conn.query1_doc(chat_id, message_id):
+                # if ret['doc_type'] == 'photo' and (date := await self.conn.query_media_date(ret['file_id'])):
+                if date := await self.conn.query_media_date(ret['file_id']):
+                    media_base = Path(str(date.year), str(date.month), f'{ret["file_id"]}.jpg')
+                    media_path = self.file_store.joinpath(base, media_base)
+                    if media_path.exists():
+                        if not (target := Path(archive, media_base)).parent.exists():
+                            target.parent.mkdir(parents=True)
+                        media_path.rename(Path(archive, media_base))
+                        logger.info('Move %s.jpg to archive', ret['file_id'])
 
     async def process_updates(
             self,
@@ -474,58 +482,3 @@ class MsgTrackerThreadClass:
         users.remove(None)
         for x in users:
             self.push_user(x)
-
-
-class CheckDuplicateMessage:
-    def __init__(self, conn: PgSQLdb, delete: bool = False):
-        self.msg: list[int] = []
-        self.conn: PgSQLdb = conn
-        self.delete: bool = delete
-
-    def start(self):
-        return asyncio.run_coroutine_threadsafe(self.run(), asyncio.get_event_loop())
-
-    async def check(self) -> None:
-        last_id = (await self.conn.query1('''SELECT "_id" FROM "index" ORDER BY "_id" DESC LIMIT 1'''))['_id']
-        total_count = (await self.conn.query1('''SELECT COUNT(*) as "count" FROM "index" WHERE "_id" < %s''', last_id))[
-            'count']
-        await self.conn.execute('''TRUNCATE "dup_check"''')
-        logger.debug('Last id is %d, total count: %d', last_id, total_count)
-        for step in range(0, total_count, 200):  # type: ignore
-            logger.debug('Current step: %d', step)
-            while True:
-                try:
-                    sql_objx = await self.conn.query(
-                        f'''SELECT "_id", "chat_id", "message_id", "from_user" 
-                        FROM "index" WHERE "_id" < $1 OFFSET {step} LIMIT 200''',
-                        last_id)
-                    break
-                except:
-                    traceback.print_exc()
-                    await asyncio.sleep(1)
-            if len(sql_objx) == 0:
-                break
-            for sqlObj in sql_objx:
-                _hash = self.get_hash(sqlObj)
-                # print(_hash)
-                await self.conn.execute('''INSERT INTO "dup_check" ("hash") VALUES ($1)''', _hash)
-        # self.conn.commit()
-        with open('pending_delete', 'w') as fout:
-            fout.write(repr(self.msg))
-
-    async def _delsql(self) -> None:
-        async with aiofiles.open('pending_delete') as fin:
-            ls = eval(await fin.read())
-        for x in ls:
-            await self.conn.execute('''DELETE FROM "index" WHERE "_id" = $1''', x)
-
-    async def run(self) -> None:
-        if self.delete:
-            await self._delsql()
-        else:
-            await self.check()
-
-    @staticmethod
-    def get_hash(sql_obj: asyncpg.Record) -> str:
-        return hashlib.sha256(
-            ' '.join(map(str, (sql_obj['chat_id'], sql_obj['message_id'], sql_obj['from_user']))).encode()).hexdigest()
